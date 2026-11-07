@@ -49,6 +49,17 @@ struct DecodeView: View {
     @ViewBuilder private var controls: some View {
         @Bindable var d = model.decoder
         VStack(alignment: .leading, spacing: 16) {
+            SectionCard(title: "Mode") {
+                Picker("Decode", selection: $d.sentenceMode) {
+                    Text("Whole sentence").tag(true)
+                    Text("One word per press").tag(false)
+                }
+                .pickerStyle(.segmented)
+                Text(d.sentenceMode ? String(format: "Press once and mouth the whole sentence (up to %.1f s; ends when you stop).", model.config.sentence.windowSeconds)
+                                    : "The original mode: one word per press.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            VoiceSetupCard()
             SectionCard(title: "Next-word prediction") {
                 Picker("Strength", selection: Binding(get: { model.config.context.strength },
                                                       set: { v in model.updateConfig { $0.context.strength = v } })) {
@@ -145,7 +156,8 @@ private struct ResultCard: View {
                     resultBody(r)
                 } else {
                     Image(systemName: "airpodspro").font(.system(size: 54)).foregroundStyle(.secondary)
-                    Text(model.classifier == nil ? "Enroll at least two words first" : "Press Space (or the stem) and mouth a word")
+                    Text(model.classifier == nil ? "Enroll at least two words first"
+                         : d.sentenceMode ? "Press Space (or the stem) and mouth the whole sentence" : "Press Space (or the stem) and mouth a word")
                         .font(.title3).foregroundStyle(.secondary)
                 }
             }
@@ -155,7 +167,7 @@ private struct ResultCard: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             if model.classifier != nil, d.phase == .idle {
-                Button("Decode a word") { d.trigger() }.buttonStyle(.borderedProminent).controlSize(.large)
+                Button(d.sentenceMode ? "Decode a sentence" : "Decode a word") { d.trigger() }.buttonStyle(.borderedProminent).controlSize(.large)
             }
         }
         .padding(30)
@@ -168,16 +180,35 @@ private struct ResultCard: View {
         if r.outcome == .discarded {
             Text("—").font(.system(size: 72, weight: .bold, design: .rounded)).foregroundStyle(.secondary)
             Text(r.prediction.rejectReason ?? "Not recognised").font(.title3).foregroundStyle(.secondary)
+        } else if let sentence = r.sentence {
+            // Each word with its runner-ups: one tap fixes a word (PRD fast correction, D40).
+            HStack(alignment: .top, spacing: 18) {
+                ForEach(Array(sentence.words.enumerated()), id: \.offset) { idx, w in
+                    VStack(spacing: 4) {
+                        Text(w.label).font(.system(size: 40, weight: .bold, design: .rounded))
+                        ForEach(w.alternatives, id: \.self) { alt in
+                            Button(alt) { d.correct(resultID: r.id, index: idx, to: alt) }
+                                .buttonStyle(.bordered).controlSize(.small)
+                        }
+                    }
+                }
+            }
         } else {
             Text(r.prediction.best?.label ?? "?").font(.system(size: 80, weight: .bold, design: .rounded))
         }
-        HStack(spacing: 16) {
+        if !r.isSentence { HStack(spacing: 16) {
             ForEach(r.prediction.ranked.prefix(3)) { item in
                 VStack {
                     Text(displayLabel(item.label)).font(.callout)
                     Text(String(format: "%.2f", item.score)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
+        } }
+        if let delay = r.voiceDelay {
+            let ok = delay < Decoder.delayTarget
+            Label(String(format: "Voice %.2f s after the word ended · %@", delay, r.voiceSource?.rawValue ?? ""),
+                  systemImage: ok ? "speaker.wave.2.fill" : "tortoise.fill")
+                .font(.callout).foregroundStyle(ok ? .green : .orange)
         }
         if let motion = r.motionBest, let final = r.prediction.best?.label, motion != final, r.outcome != .discarded {
             Text("Motion alone said \"\(displayLabel(motion))\"; the phrase context picked \"\(final)\"")
@@ -211,6 +242,54 @@ private struct FlowChips: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+}
+
+/// ElevenLabs voice setup (PRD item 1). The key goes to the Keychain, never to disk or the repo.
+private struct VoiceSetupCard: View {
+    @Environment(AppModel.self) private var model
+    @State private var keyField = ""
+
+    var body: some View {
+        let v = model.voice
+        SectionCard(title: "Your voice (ElevenLabs)") {
+            Toggle("Speak in my voice", isOn: Binding(get: { v.settings.enabled }, set: { v.settings.enabled = $0 }))
+            HStack {
+                SecureField(v.hasKey ? "API key saved ✓ (paste to replace)" : "ElevenLabs API key", text: $keyField)
+                Button("Save") { v.setAPIKey(keyField); keyField = ""; v.refreshCache(words: model.words) }
+                    .disabled(keyField.isEmpty)
+            }
+            TextField("Voice ID (from your ElevenLabs voice clone)", text: Binding(
+                get: { v.settings.voiceID },
+                set: { v.settings.voiceID = $0.trimmingCharacters(in: .whitespaces); v.refreshCache(words: model.words) }))
+            HStack {
+                Button(v.isPreparing ? "Generating…" : "Generate voice for all words") {
+                    Task { await v.prepare(words: model.words) }
+                }
+                .disabled(!v.isConfigured || v.isPreparing)
+                Button("Play test") { Task { await v.speak(model.words.first ?? "hello") } }
+            }
+            if v.isPreparing { ProgressView(value: v.prepareProgress) }
+            Text(v.isConfigured
+                 ? "Cached \(v.cachedWords.count) of \(model.words.count) words. Cached words play instantly, offline."
+                 : "Not set up yet: decoded words use the system voice until a key and voice ID are added.")
+                .font(.caption).foregroundStyle(.secondary)
+            if !v.status.isEmpty { Text(v.status).font(.caption).foregroundStyle(.secondary) }
+            if let e = v.lastError { Text(e).font(.caption).foregroundStyle(.red) }
+            delayStats
+        }
+    }
+
+    @ViewBuilder private var delayStats: some View {
+        let delays = model.decoder.results.compactMap(\.voiceDelay).prefix(10)
+        if !delays.isEmpty {
+            let sorted = delays.sorted()
+            let median = sorted[sorted.count / 2], worst = sorted.last!
+            Text(String(format: "Delay, last %d: median %.2f s, worst %.2f s (target < %.1f s)",
+                        delays.count, median, worst, Decoder.delayTarget))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(worst < Decoder.delayTarget ? .green : .orange)
         }
     }
 }

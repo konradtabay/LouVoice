@@ -9,7 +9,21 @@ public struct ClassifierConfig: Codable, Sendable, Hashable {
     public var band: Double = 0.2
     public var augment = AugmentConfig()
     public var seed: UInt64 = 1
+    /// Soft clip of scaled features in standard deviations; 0 = off (D42).
+    public var softClip: Double = 3
     public init() {}
+
+    enum CodingKeys: String, CodingKey { case k, augmentCopies, band, augment, seed, softClip }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = ClassifierConfig()
+        k = try c.decodeIfPresent(Int.self, forKey: .k) ?? d.k
+        augmentCopies = try c.decodeIfPresent(Int.self, forKey: .augmentCopies) ?? d.augmentCopies
+        band = try c.decodeIfPresent(Double.self, forKey: .band) ?? d.band
+        augment = try c.decodeIfPresent(AugmentConfig.self, forKey: .augment) ?? d.augment
+        seed = try c.decodeIfPresent(UInt64.self, forKey: .seed) ?? d.seed
+        softClip = try c.decodeIfPresent(Double.self, forKey: .softClip) ?? d.softClip
+    }
 }
 
 public struct LabeledFeatures: Sendable {
@@ -25,6 +39,7 @@ public struct RankedLabel: Hashable, Sendable, Identifiable {
     public var label: String
     public var score: Double
     public var id: String { label }
+    public init(label: String, score: Double) { self.label = label; self.score = score }
 }
 
 public struct Prediction: Sendable {
@@ -42,7 +57,11 @@ public struct Prediction: Sendable {
 
 /// Mean-of-k-nearest DTW classifier over real + augmented references (D10).
 public struct Classifier: Sendable {
-    struct Reference: Sendable { var label: String; var owner: Int; var sequence: FeatureSequence }
+    struct Reference: Sendable {
+        var label: String; var owner: Int; var sequence: FeatureSequence
+        /// Made by mixing in recorded movement (D42); not used as a sentence template.
+        var synthetic = false
+    }
 
     public let config: ClassifierConfig
     public let labels: [String]
@@ -61,12 +80,13 @@ public struct Classifier: Sendable {
     static func buildReferences(_ takes: [LabeledFeatures], scales: [Double], config: ClassifierConfig) -> [Reference] {
         var refs: [Reference] = []
         for (owner, take) in takes.enumerated() {
-            let base = Features.scaled(take.features, by: scales)
-            refs.append(Reference(label: take.label, owner: owner, sequence: base))
+            let base = Features.scaled(take.features, by: scales, clip: config.softClip)
+            let synthetic = take.id.contains("-noise")
+            refs.append(Reference(label: take.label, owner: owner, sequence: base, synthetic: synthetic))
             var rng = SeededRNG(seed: config.seed ^ stableHash(take.id))
             for _ in 0..<config.augmentCopies {
                 refs.append(Reference(label: take.label, owner: owner,
-                                      sequence: Augment.augment(base, config: config.augment, rng: &rng)))
+                                      sequence: Augment.augment(base, config: config.augment, rng: &rng), synthetic: synthetic))
             }
         }
         return refs
@@ -75,7 +95,7 @@ public struct Classifier: Sendable {
     /// Classes ranked by mean of the k smallest distances. `active` restricts to a word subset
     /// (context screens); `_none` is always kept.
     public func rank(_ query: FeatureSequence, active: Set<String>? = nil) -> [RankedLabel] {
-        let q = Features.scaled(query, by: scales)
+        let q = Features.scaled(query, by: scales, clip: config.softClip)
         let allowed = active.map { $0.union([noneLabel]) }
         var nearest: [String: [Double]] = [:]
         for ref in references {

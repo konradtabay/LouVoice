@@ -74,6 +74,35 @@ struct TuneView: View {
                 Text("Strength = peak jaw activity ÷ the take's own quiet part. Your recorded words range 3.4×–20×, median 8×.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            SectionCard(title: "Robustness to movement") {
+                Stepper("Noisy training copies: \(c.robustness.noiseCopies)",
+                        value: binding({ $0.robustness.noiseCopies }, { $0.robustness.noiseCopies = $1 }), in: 0...8)
+                labeledSlider("Movement strength (max)", value: binding({ $0.robustness.maxStrength }, { $0.robustness.maxStrength = max($1, $0.robustness.minStrength) }),
+                              range: 0.2...1.5, step: 0.1, format: String(format: "%.1f–%.1f×", c.robustness.minStrength, c.robustness.maxStrength))
+                labeledSlider("Soft clip", value: binding({ $0.classifier.softClip }, { $0.classifier.softClip = $1 }),
+                              range: 0...6, step: 0.5, format: c.classifier.softClip == 0 ? "off" : String(format: "%.1fσ", c.classifier.softClip))
+                labeledSlider("Decode: refuse if head moved more than", value: binding({ $0.robustness.decodeMaxHeadDegrees }, { $0.robustness.decodeMaxHeadDegrees = $1 }),
+                              range: 0...40, step: 5, format: c.robustness.decodeMaxHeadDegrees == 0 ? "off" : String(format: "%.0f°", c.robustness.decodeMaxHeadDegrees))
+                Text("Noisy copies mix your recorded turns/nods/chewing into training takes, so words are learned with movement on top.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            SectionCard(title: "Sentence") {
+                labeledSlider("Longest sentence", value: binding({ $0.sentence.windowSeconds }, { $0.sentence.windowSeconds = $1 }),
+                              range: 2...10, step: 0.5, format: String(format: "%.1f s", c.sentence.windowSeconds))
+                Toggle("Stop when I stop mouthing", isOn: binding({ $0.sentence.stopWhenQuiet }, { $0.sentence.stopWhenQuiet = $1 }))
+                labeledSlider("…after stillness of", value: binding({ $0.sentence.stopAfterQuietSeconds }, { $0.sentence.stopAfterQuietSeconds = $1 }),
+                              range: 0.4...2, step: 0.1, format: String(format: "%.1f s", c.sentence.stopAfterQuietSeconds))
+                labeledSlider("Fastest word (squash limit)", value: binding({ $0.sentence.minCompression }, { $0.sentence.minCompression = $1 }),
+                              range: 0.15...0.6, step: 0.05, format: String(format: "%.0f%% of a trained take", c.sentence.minCompression * 100))
+                labeledSlider("Per-word penalty", value: binding({ $0.sentence.insertionPenalty }, { $0.sentence.insertionPenalty = $1 }),
+                              range: 0...6, step: 0.5, format: String(format: "%.1f", c.sentence.insertionPenalty))
+                labeledSlider("Context weight", value: binding({ $0.sentence.contextWeight }, { $0.sentence.contextWeight = $1 }),
+                              range: 0...16, step: 1, format: String(format: "%.0f", c.sentence.contextWeight))
+                labeledSlider("Longest word", value: binding({ $0.sentence.maxWordSeconds }, { $0.sentence.maxWordSeconds = $1 }),
+                              range: 0.6...2, step: 0.1, format: String(format: "%.1f s", c.sentence.maxWordSeconds))
+                Text("Lower penalty suits fast, flowing speech. Context weight scales with the Decode strength (Strong ×0.5).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             SectionCard(title: "Capture (new takes only)") {
                 labeledSlider("Window", value: $model.capture.window, range: 1.0...3.0, step: 0.1,
                               format: String(format: "%.1f s", model.capture.window))

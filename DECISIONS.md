@@ -304,3 +304,135 @@ A continuously running output stream keeps the link awake, and rebuilding on rou
 **Decision:** The default next-word prediction strength is **Strong** (weight 0.5, temperature 0.1). Balanced is still available.
 **Why:** The user's choice for the demo, where the phrase is known: 94% of words and 83% of whole phrases right when said in order (D37).
 **Accepted cost:** Words mouthed out of order drop to about 41% (Balanced: 65%). Switch to Balanced or Off for free-order use.
+
+### D39: ElevenLabs voice output with a local cache (2026-11-07). *PRD-CHANGES item 1.*
+**Decision:** A new `VoiceService` speaks each accepted decode in the user's ElevenLabs voice clone.
+- **Synthesis:** POST `/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128` with the `xi-api-key` header and `model_id = eleven_flash_v2_5` (`TODO(team)`: confirm the model).
+- **Cache:** every vocabulary word is synthesized once and cached at `<data dir>/voice/<voiceID>/<hash>.mp3`. Generation runs after an enrollment finishes, when a word is added, and on launch if anything is missing. Playback is a local `AVAudioPlayer`: instant, and no Wi-Fi needed.
+- **Live fallback:** words not cached yet are fetched live, then cached.
+- **Without a key or voice ID** it falls back to the system voice, so decode always speaks.
+
+**Key handling:** The API key is read from the `ELEVENLABS_API_KEY` environment variable or the macOS Keychain (service `LouVoice.ElevenLabs`). It's entered through a SecureField and never written to disk or the repo; `.gitignore` also covers `.env`, `*.key` and `elevenlabs*.txt`. The voice ID and model live in UserDefaults.
+
+**Delay (PRD success test < 1.5 s):** measured as the quiet part of the capture window after the word, plus processing, plus time to start playback. The new `SegmentFeatures.trailingSeconds` records that quiet tail, and the Decode screen shows the delay per word plus the median and worst of the last 10. On 241 recorded word takes, the tail alone is median 0.68 s, p90 0.80 s, max 1.48 s, so cached playback should land at about 0.7–0.9 s typically, plus about 0.1–0.2 s of Bluetooth output latency the app can't measure.
+- The fixed 1.8 s window is the main delay; continuous recognition (item 2) will end segments as the word ends.
+- **Not verified** with a real key or voice. The endpoint shape was checked with an invalid key (HTTP 401, not 404).
+
+### D40: Whole-sentence decoding and sentence training (2026-11-07). *PRD-CHANGES item 2, first part.*
+**Decision:** A sentence mode where one press captures a 4 s window (`TODO(team)`: tune for longer phrases) and the whole sentence comes out word by word.
+- `SentenceDecoder` runs a dynamic program over every way to split the motion into words. Each candidate segment is scored by DTW against that word's most recent 12 real templates (mean of the best 2), plus a per-word penalty and the next-word context (bigram).
+- Speed: one open-ended DTW pass per (start frame, template) scores every possible end point at once. That's about 30× cheaper than one DTW per segment: **0.03 s per sentence**.
+- The one-word-per-press mode stays as a fallback (Decode › Mode).
+
+**Sentence training:** In Enroll, the user mouths the whole phrase, flowing, at their natural (fast) pace. Each take is:
+1. decoded by a model that hasn't seen this block, giving an honest live score (words and whole sentence);
+2. **forced-aligned** to the known words with the current model, cut into per-word sample windows (0.3 s lead-in, 0.15 s tail) and stored as ordinary word takes in a `sentence-…` block. This gives the recognizer fast, joined-up versions of each word;
+3. stored whole as a sentence take (`Take.isSentence`, excluded from word training), so it can be re-cut later as the model improves.
+
+Confirmed sentence decodes (nod or Y) are cut and learned the same way.
+
+**Correction:** Each decoded word shows its 2 runner-up words as buttons; one tap replaces it. This is the start of PRD item 4.
+
+**Tuning on stitched sentences** (`LouVoiceCheck --sentences [--grid]`): one held-out take per word, concatenated in phrase order, decoded by a model trained on the other blocks, at normal speed and 1.33× time-compressed. At Strong context:
+
+| Per-word penalty / context weight | Normal: words | Normal: whole sentence | 1.33× faster: words | 1.33× faster: whole sentence |
+|---|---|---|---|---|
+| 0 / 4 (**chosen**) | 95% | 77% | 93% | 79% |
+| 1.5 / 4 | 97% | 85% | 89% | 70% |
+| 3 / 2 (first guess) | 88% | 71% | 82% | 50% |
+| any / no context | 39–46% | 3–8% | 38–46% | 3–8% |
+
+Penalty 0 was chosen because the user will speak faster. The context weight scales with the Decode strength (`SentenceConfig.contextWeight × context.weight`, so Strong = 4). Forced alignment puts word boundaries within about 0.1 s on average.
+
+**Caveat:** Stitched sentences have no co-articulation. Real flowing sentences will score lower until sentence-training takes exist, which is what the next round collects.
+**Not done yet (rest of item 2):** continuous listening with no press per sentence. That's planned together with item 3 (hands-free start and stop).
+
+### D41: Full-history phrase model with end-of-sentence for sentence decoding (2026-11-07). *Amends D40.*
+**Finding:** With the D40 bigram, every failed stitched sentence was the **wrong length**, never a wrong word. The two errors were:
+- running on past the end, "hello can you hear me hello" (×19), caused by the word-mode rule that wraps the last word back to the first;
+- stopping early, "hello can you" (×18 at the faster pace), because ending a sentence cost nothing.
+
+**Decision:** Sentence decoding uses a **prefix tree of the expected phrases** (`PhraseTrie`) instead of the bigram:
+- P(next word) depends on the whole history said so far.
+- Each phrase has an explicit **end-of-sentence** mark, so stopping early or running on is penalised.
+- An unexpected word leaves the tree (via smoothing) into a "free" state, where every word and ending are equally likely.
+- The decoder's dynamic-program state is the tree node.
+- Word mode keeps the bigram with wrap-around, which is right between separate presses.
+
+**Results** (stitched held-out takes; words / whole sentence right; per-word penalty 0):
+
+| Test | Off | Balanced | Strong |
+|---|---|---|---|
+| "hello can you hear me", normal | 30% / 2% | 98% / 95% | 99% / 96% |
+| … 1.33× faster | 31% / 1% | 100% / 100% | 100% / 100% |
+| 4 known phrases, say any | 30% / 9% | 87% / 82% | 88% / 83% |
+| Off-script random 3–5 words | 37% / 7% | 26% / 2% | 20% / 0% |
+
+Penalties of 1 and 2 changed nothing material.
+
+**What this means (for honest claims):**
+- With a single known phrase, near-100% is guaranteed by the prior and proves little.
+- The real evidence is **choosing among several known phrases from motion: 83% whole-phrase right**, against 9% without context.
+- Context makes LouVoice a **phrasebook**: off-script sentences get worse, because they're pulled towards known phrases.
+- For the demo, register several phrases so the choice is real. The PRD already scopes LouVoice to trained words and phrases.
+- Stitched sentences lack co-articulation, so real flowing sentences need confirming with the sentence-training round.
+
+### D42: Train with recorded movement mixed in; soft-clip features (2026-11-07)
+**Test method** (`LouVoiceCheck --eval … --robust`):
+- Take each held-out word, then mix in the movement from a real recorded "not a word" take (turn, nod, look up, chew, swallow, smile) from *another* block, at 0, 0.25, 0.5 and 1.0× its recorded strength. `Interference.mix` adds rotation rate and acceleration, and composes the extra rotation onto the attitude and gravity.
+- The model trains on the other blocks, as in leave-one-block-out.
+
+**Finding:** Movement is very damaging. A quarter-strength head movement drops word accuracy from 69% to 38%.
+
+| Variant | 0 | 0.25 | 0.5 | 1.0 |
+|---|---|---|---|---|
+| Baseline | 69% | 38% | 26% | 11% |
+| Soft clip 3σ only | 69% | 37% | 22% | 12% |
+| Noisy training ×2 | 68% | 45% | 41% | 20% |
+| **Noisy ×2 + soft clip 3σ (chosen)** | **68%** | **45%** | **42%** | **25%** |
+| Noisy ×6 (0.2–1.0×) + clip | 68% | 47% | 42% | 31% |
+| Head gate 10° (no noise training) | 69% | 49%, answers 55% | 38%, answers 53% | 27%, answers 42% |
+
+Each cell uses one random movement per test take, so it carries about ±3 points of noise.
+
+**Decision:**
+- **2 noisy training copies per word take** (`RobustnessConfig.noiseCopies`): random recorded movement at 0.3–0.8× strength, time-shifted ±0.3 s.
+- **Soft clipping at 3σ** (`ClassifierConfig.softClip`), so one big spike can't dominate a DTW distance.
+- About +7 to +17 points under movement, for about 1 point on clean takes.
+- ×6 was only slightly better and makes matching 3× heavier, so it isn't the default.
+
+**Details:**
+- Noisy copies are marked synthetic and never used as sentence templates, so sentence decoding still matches against real takes. Clean stitched sentences are unchanged: 95% / 100% whole sentence.
+- Building the noisy set runs off the main thread (about 1 s per retrain).
+- **"Hold still" gate:** decode can refuse a capture whose head turned more than N° ("Head moved 23°, hold still and try again"). It's off by default, since the gate trades answers for accuracy; it's on Tune › Robustness.
+
+**Limits:**
+- This uses mixed recordings, not real "mouthing while moving" takes, and it doesn't cover walking.
+- The strongest next step is a training block recorded while moving naturally, which these numbers can then be checked against.
+- The app's Evaluate screen still measures clean leave-one-block-out without noisy copies; `--robust` is the movement benchmark.
+
+### D43: Fix dropped words in fast sentences; end the sentence window when mouthing stops (2026-11-07). *Amends D40.*
+**Problem reported:** In sentence mode, words were being clipped or dropped.
+
+**Cause (dropped words):** Trained word takes are long after trimming, median 0.72–0.88 s, because isolated words are mouthed slowly and fully. The decoder only allowed a sentence segment down to **0.5×** a template's length (about 0.30–0.34 s), and to at least 0.16 s. Fast, flowing words are shorter, so they couldn't be placed and were merged or dropped.
+
+Stitched-sentence benchmark (`--speed`), time-compressed relative to the isolated takes; words / whole sentence at Strong:
+
+| Squash limit | ×2.0 | ×2.5 | ×3.0 |
+|---|---|---|---|
+| ≥ 0.50 (old) | 99% / 97% | 73% / 49% | 46% / 8% |
+| ≥ 0.35 | 100% / 100% | 100% / 100% | 92% / 88% |
+| **≥ 0.25 (chosen)**, shortest word 0.08 s | 100% / 100% | 100% / 100% | 100% / 100% |
+
+The multi-phrase test is unchanged (84% vs 83% whole phrase).
+
+**Cause (clipped endings):** A fixed 4 s window cuts off longer or slower sentences, and the leftover silence also delays the voice.
+
+**Decision:** Sentence captures **end when mouthing stops** (`MotionHub.captureUntilQuiet`):
+- Activity is rotation-rate magnitude with slow drift removed, smoothed over about 0.2 s.
+- "Active" is above 0.07 rad/s and "quiet" is below 0.05. Real takes: rest ≈ 0.02 (p90 0.05), word peaks 0.10–0.18.
+- The window ends after 0.8 s of quiet (`TODO(team)`: tune for users who pause between words), once at least 0.3 s of activity has happened, no earlier than 1 s after the beep, and no later than 6 s.
+
+**Check:** Replayed over 314 recorded word takes, it **never ended mid-word**, and it ended a median 0.88 s after the last movement. All of these settings are on Tune › Sentence.
+
+**Also found:** No ElevenLabs key is set yet, so decodes are spoken by the system voice.

@@ -9,7 +9,7 @@ import Observation
 ///   model trained on everything so far. Quiz takes are saved with `isTest` and never trained on.
 @MainActor @Observable
 final class Enrollment {
-    enum Mode: String { case train, quiz }
+    enum Mode: String { case train, quiz, sentence }
 
     struct Prompt: Identifiable, Hashable {
         let id = UUID()
@@ -85,6 +85,17 @@ final class Enrollment {
     private(set) var log: [String] = []
     private(set) var results: [LiveResult] = []
 
+    /// Sentence training (D40): honest decode of each sentence before its words are learned.
+    struct SentenceResult: Identifiable {
+        let id = UUID()
+        var said: [String], heard: [String], block: Int
+        var wordAccuracy: Double { SentenceScore.wordAccuracy(said: said, heard: heard) }
+        var exact: Bool { said == heard }
+    }
+    private(set) var sentenceResults: [SentenceResult] = []
+    var sentenceReps = 5
+    var sentenceBlocks = 3
+
     static let readyPause = 0.9, maxAttempts = 3
 
     @ObservationIgnored private unowned let model: AppModel
@@ -132,6 +143,127 @@ final class Enrollment {
                             session: session, prefix: prefix, quizzes: quizzes, focus: focus, extra: extra)
             self?.task = nil
         }
+    }
+
+    /// Mouth the whole phrase, flowing, each take (D40). Each take is decoded by a model that
+    /// hasn't seen this block, then aligned to the known words and cut into word takes.
+    func startSentences(phrase: String, reps: Int, blocks: Int) {
+        let words = phrase.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        guard task == nil, words.count >= 2 else { return }
+        let session = Self.stamp()
+        mode = .sentence
+        totalBlocks = blocks
+        total = blocks * reps
+        completed = 0; rejected = 0; block = 0; log = []; results = []; sentenceResults = []
+        task = Task { [weak self] in
+            await self?.runSentences(phrase: words.joined(separator: " "), words: words, reps: reps, blocks: blocks, session: session)
+            self?.task = nil
+        }
+    }
+
+    private func runSentences(phrase: String, words: [String], reps: Int, blocks: Int, session: String) async {
+        let hub = model.hub, cues = model.cues
+        for b in 1...blocks {
+            block = b
+            if b > 1 {
+                phase = .blockBreak(next: b)
+                cues.say("Take out both AirPods, put them back in, then press continue")
+                if hub.isSimulated { hub.simulator.reseat() }
+                await withCheckedContinuation { breakContinuation = $0 }
+                if Task.isCancelled { return }
+            }
+            let blockID = "sentence-\(session)-b\(b)"
+            let honest = await buildClassifier(excluding: blockID)
+            var done = 0, attempts = 0
+            while done < reps {
+                if Task.isCancelled { return }
+                let prompt = Prompt(label: phrase, text: phrase, action: .word(words[0]))
+                phase = .ready(prompt, quiz: false)
+                cues.say(phrase)
+                try? await Task.sleep(for: .seconds(Self.readyPause + 1.2))
+                if Task.isCancelled { return }
+                phase = .recording(prompt, quiz: false)
+                cues.play(.start)
+                if hub.isSimulated { simulateSentence(words) }
+                let sc = model.config.sentence
+                let samples = sc.stopWhenQuiet
+                    ? await hub.captureUntilQuiet(preroll: model.capture.preroll, maxWindow: sc.windowSeconds, quiet: sc.stopAfterQuietSeconds)
+                    : await hub.capture(preroll: model.capture.preroll, window: sc.windowSeconds)
+                cues.play(.end)
+                if Task.isCancelled { return }
+
+                let config = model.config
+                guard let features = Features.extract(samples, config: config.features) else {
+                    phase = .feedback(ok: false, message: "No motion data — are the AirPods connected?", heard: nil, correct: nil)
+                    try? await Task.sleep(for: .seconds(1.2)); continue
+                }
+                var q = config.quality; q.checkHeadMovement = false     // a 4 s sentence moves the head a little
+                if let problem = Quality.check(features, config: q, isNone: false), attempts < Self.maxAttempts {
+                    rejected += 1; attempts += 1
+                    log.insert("✗ sentence: \(problem)", at: 0)
+                    phase = .feedback(ok: false, message: problem, heard: nil, correct: nil)
+                    try? await Task.sleep(for: .seconds(1.4)); continue
+                }
+                attempts = 0
+
+                // 1. Honest test: decode with a model that never saw this block.
+                var heard: [String]?
+                if let honest, let dec = SentenceDecoder(classifier: honest, pipeline: config, config: config.sentence) {
+                    heard = await Task.detached(priority: .userInitiated) {
+                        dec.decode(samples, context: config.context)?.words.map(\.label)
+                    }.value
+                }
+                if let heard { sentenceResults.append(SentenceResult(said: words, heard: heard, block: b)) }
+
+                // 2. Learn: align to the known words with the current model and store each word.
+                var added = 0
+                if let full = model.classifier ?? honest, let dec = SentenceDecoder(classifier: full, pipeline: config, config: config.sentence) {
+                    let cuts: [(String, [MotionSample])] = await Task.detached(priority: .userInitiated) {
+                        guard let f = dec.features(samples), let aligned = dec.align(f.seq, phrase: words) else { return [] }
+                        let result = LouVoiceCore.SentenceResult(words: aligned, rate: config.features.rate,
+                                                                 startOffset: f.startOffset, trailingSeconds: f.trailing)
+                        return Array(zip(aligned.map(\.label), SentenceDecoder.cut(samples, result: result)))
+                    }.value
+                    for (label, cut) in cuts {
+                        guard let wf = Features.extract(cut, config: config.features) else { continue }
+                        model.addTake(Take(label: label, block: blockID, session: session, samples: cut), features: wf)
+                        added += 1
+                    }
+                }
+                model.addTake(Take(label: phrase, block: blockID, session: session, samples: samples, isSentence: true), features: features)
+                done += 1; completed += 1
+
+                let heardText = heard?.joined(separator: " ")
+                let correct = heard.map { $0 == words }
+                log.insert("sentence: heard \"\(heardText ?? "—")\" · learned \(added)/\(words.count) words", at: 0)
+                phase = .feedback(ok: true, message: added == words.count ? "Learned all \(added) words" : "Learned \(added) of \(words.count) words",
+                                  heard: heardText, correct: correct)
+                try? await Task.sleep(for: .seconds(1.3))
+            }
+        }
+        if Task.isCancelled { return }
+        cues.play(.ready)
+        cues.say("Sentence training done")
+        phase = .finished
+        if model.voice.isConfigured { await model.voice.prepare(words: model.words) }
+    }
+
+    /// Simulator: perform the phrase's words one after another at a fast pace.
+    private func simulateSentence(_ words: [String]) {
+        let hub = model.hub
+        Task { @MainActor in
+            for w in words {
+                hub.simulate(.word(w))
+                try? await Task.sleep(for: .milliseconds(520))
+            }
+        }
+    }
+
+    /// Mean word accuracy and exact-sentence rate of the honest sentence decodes.
+    func sentenceScore(block: Int? = nil) -> (words: Double?, exact: Double?, count: Int) {
+        let rs = sentenceResults.filter { block == nil || $0.block == block! }
+        guard !rs.isEmpty else { return (nil, nil, 0) }
+        return (rs.map(\.wordAccuracy).reduce(0, +) / Double(rs.count), Double(rs.filter(\.exact).count) / Double(rs.count), rs.count)
     }
 
     func startQuiz(words: [String], reps: Int) {
@@ -200,12 +332,15 @@ final class Enrollment {
         cues.play(.ready)
         cues.say(mode == .quiz ? "Quiz done" : "Enrollment done")
         phase = .finished
+        // Cache the user's voice for every word now, so decode playback is instant and offline.
+        if model.voice.isConfigured { await model.voice.prepare(words: model.words) }
     }
 
     private func buildClassifier(excluding block: String?) async -> Classifier? {
-        let training = model.trainingFeatures(excludingBlock: block)
-        let config = model.config.classifier
-        return await Task.detached(priority: .userInitiated) { Classifier(training: training, config: config) }.value
+        let input = model.trainingInputs(excludingBlock: block)
+        return await Task.detached(priority: .userInitiated) {
+            Classifier(training: AppModel.buildTraining(input), config: input.config.classifier)
+        }.value
     }
 
     private func runPrompts(_ prompts: [Prompt], block b: Int, blockID: String, session: String,

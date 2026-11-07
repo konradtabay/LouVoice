@@ -6,6 +6,7 @@ struct EnrollView: View {
     @State private var newWord = ""
     @State private var teachWord = ""
     @State private var quizReps = 2
+    @State private var sentencePhrase = ""
 
     var body: some View {
         let e = model.enrollment
@@ -119,6 +120,24 @@ struct EnrollView: View {
                     .disabled(!canRecord || model.words.isEmpty)
                 }
             }
+            SectionCard(title: "Sentence training (flowing)") {
+                Picker("Phrase", selection: $sentencePhrase) {
+                    ForEach(model.config.context.phrases.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }, id: \.self) { Text($0).tag($0) }
+                }
+                Stepper("Sentences per block: \(e.sentenceReps)", value: $e.sentenceReps, in: 1...10)
+                Stepper("Blocks: \(e.sentenceBlocks)", value: $e.sentenceBlocks, in: 1...6)
+                Text(String(format: "Up to %.1f s, ends when you stop (Tune › Sentence). ≈ %d min.", model.config.sentence.windowSeconds,
+                            max(1, Int(Double(e.sentenceReps * e.sentenceBlocks) * (model.config.sentence.windowSeconds + 3.5) / 60))))
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Start sentence training") {
+                    e.startSentences(phrase: sentencePhrase.isEmpty ? (model.config.context.phrases.first ?? "") : sentencePhrase,
+                                     reps: e.sentenceReps, blocks: e.sentenceBlocks)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canRecord || model.classifier == nil)
+                Text("Mouth the whole sentence after the beep, flowing, at your natural fast pace. Each one is scored first, then cut into words and learned.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             SectionCard(title: "Quiz only (test, no training)") {
                 Stepper("Reps per word: \(quizReps)", value: $quizReps, in: 1...5)
                 Button("Run quiz") { e.startQuiz(words: model.words, reps: quizReps) }
@@ -155,7 +174,21 @@ private struct LiveAccuracyPanel: View {
         let e = model.enrollment
         VStack(alignment: .leading, spacing: 14) {
             Text("Live accuracy").font(.headline)
-            if e.results.isEmpty {
+            if e.mode == .sentence || !e.sentenceResults.isEmpty {
+                let sc = e.sentenceScore()
+                MetricTile(title: "Sentence words", value: percent(sc.words), detail: "\(sc.count) sentences, unseen block")
+                MetricTile(title: "Whole sentence right", value: percent(sc.exact))
+                ForEach(e.sentenceResults.suffix(6).reversed()) { r in
+                    Text((r.exact ? "✓ " : "✗ ") + (r.heard.isEmpty ? "—" : r.heard.joined(separator: " ")))
+                        .font(.caption.monospaced()).foregroundStyle(r.exact ? .green : .secondary)
+                }
+                if Set(e.sentenceResults.map(\.block)).count > 1 {
+                    ForEach(Array(Set(e.sentenceResults.map(\.block))).sorted(), id: \.self) { b in
+                        let s = e.sentenceScore(block: b)
+                        Text("Block \(b): words \(percent(s.words)) · whole \(percent(s.exact))").font(.caption.monospacedDigit())
+                    }
+                }
+            } else if e.results.isEmpty {
                 Text("Each take is predicted by a model that hasn't seen this block before it's saved. Scores appear from block 2 (or right away if you already have data).")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
@@ -225,12 +258,14 @@ private struct PromptCard: View {
                 coaching
             case .ready(let p, let quiz):
                 quizTag(quiz)
-                Text(p.text).font(.system(size: p.label == noneLabel ? 36 : 72, weight: .bold, design: .rounded))
+                Text(p.text).font(.system(size: p.label == noneLabel || p.label.contains(" ") ? 40 : 72, weight: .bold, design: .rounded))
+                    .multilineTextAlignment(.center)
                 hint(p)
                 Text("Get ready… mouth it after the beep").foregroundStyle(.secondary)
             case .recording(let p, let quiz):
                 quizTag(quiz)
-                Text(p.text).font(.system(size: p.label == noneLabel ? 36 : 72, weight: .bold, design: .rounded))
+                Text(p.text).font(.system(size: p.label == noneLabel || p.label.contains(" ") ? 40 : 72, weight: .bold, design: .rounded))
+                    .multilineTextAlignment(.center)
                 hint(p)
                 Label("Now", systemImage: "record.circle.fill").font(.title2).foregroundStyle(.red)
             case .feedback(let ok, let message, let heard, let correct):
@@ -256,7 +291,8 @@ private struct PromptCard: View {
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             case .finished:
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 54)).foregroundStyle(.green)
-                Text(model.enrollment.mode == .quiz ? "Quiz complete" : "Training complete").font(.title.weight(.semibold))
+                Text(model.enrollment.mode == .quiz ? "Quiz complete" : model.enrollment.mode == .sentence ? "Sentence training complete" : "Training complete")
+                    .font(.title.weight(.semibold))
                 HStack {
                     Button("Evaluate") { model.screen = .evaluate; model.runEvaluation() }
                     Button("Auto-tune") { model.screen = .tune; model.runAutoTune() }
@@ -270,6 +306,9 @@ private struct PromptCard: View {
     }
 
     @ViewBuilder private func hint(_ p: Enrollment.Prompt) -> some View {
+        if p.label.contains(" ") {
+            Text("Whole sentence, flowing, at your fast natural pace").font(.title3).foregroundStyle(.blue)
+        }
         if let other = p.contrastWith {
             Text("CONTRAST DRILL: make it clearly different from \"\(other)\"").font(.caption.weight(.bold))
                 .padding(.horizontal, 8).padding(.vertical, 3)

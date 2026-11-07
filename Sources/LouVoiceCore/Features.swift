@@ -118,6 +118,9 @@ public struct SegmentFeatures: Sendable {
     /// Largest head rotation from the segment start, before filtering (degrees).
     public var headRotationDegrees: Double
     public var location: SensorLocation
+    /// Seconds between the end of the detected word and the end of the capture window
+    /// (0 when nothing was trimmed). Used to measure end-of-word → audio delay (D39).
+    public var trailingSeconds: Double = 0
 }
 
 public enum Features {
@@ -168,8 +171,10 @@ public enum Features {
         if keep.isEmpty { keep = Array(0..<dims) }
         var frames: [[Double]] = (0..<s.count).map { i in keep.map { channels[$0][i] } }
 
+        var trailing = 0.0
         if config.trim, let range = activeRange(energies, config: config) {
             frames = Array(frames[range])
+            trailing = Double(s.count - 1 - range.upperBound) / config.rate
         }
         let sequence = derive(frames, config: config)
         return SegmentFeatures(
@@ -178,7 +183,8 @@ public enum Features {
             energyPeak: energies.max() ?? 0,
             maxGap: resampled.maxGap,
             headRotationDegrees: headDegrees,
-            location: s[0].location)
+            location: s[0].location,
+            trailingSeconds: trailing)
     }
 
     /// Optional derived channels and per-take normalisation (D33).
@@ -257,9 +263,16 @@ public enum Features {
         return (0..<dims).map { d in max((sq[d] / n - pow(sum[d] / n, 2)).squareRoot(), 1e-6) }
     }
 
-    public static func scaled(_ seq: FeatureSequence, by scales: [Double]) -> FeatureSequence {
+    /// Divide each channel by its training spread; `clip` > 0 soft-limits values to ±clip
+    /// (c·tanh(x/c)) so a big head-movement spike can't dominate the DTW distance (D42).
+    public static func scaled(_ seq: FeatureSequence, by scales: [Double], clip: Double = 0) -> FeatureSequence {
         var out = seq
-        for i in 0..<seq.count { for d in 0..<seq.dims { out[frame: i, dim: d] /= scales[d] } }
+        for i in 0..<seq.count {
+            for d in 0..<seq.dims {
+                let v = seq[frame: i, dim: d] / scales[d]
+                out[frame: i, dim: d] = clip > 0 ? clip * tanh(v / clip) : v
+            }
+        }
         return out
     }
 

@@ -60,6 +60,8 @@ final class MotionHub {
         var samples: [MotionSample]
         let continuation: CheckedContinuation<[MotionSample], Never>
         var done = false
+        /// Optional early end (sentence endpointing, D43).
+        var shouldEnd: ((MotionSample) -> Bool)?
         init(end: Double, samples: [MotionSample], continuation: CheckedContinuation<[MotionSample], Never>) {
             self.end = end; self.samples = samples; self.continuation = continuation
         }
@@ -172,7 +174,7 @@ final class MotionHub {
 
         for c in captures where !c.done {
             c.samples.append(s)
-            if s.t >= c.end { finish(c) }
+            if s.t >= c.end || (c.shouldEnd?(s) ?? false) { finish(c) }
         }
         captures.removeAll { $0.done }
         onSample?(s)
@@ -195,6 +197,40 @@ final class MotionHub {
             // If samples stop arriving, return what we have.
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(window + 1.5))
+                self?.finish(c)
+                self?.captures.removeAll { $0.done }
+            }
+        }
+    }
+
+    /// Sentence capture that ends when the user stops mouthing (D43): after at least `minActive`
+    /// seconds of activity, `quiet` seconds below the quiet level end it; `maxWindow` caps it.
+    /// Activity = rotation-rate magnitude with slow drift removed, smoothed over ~0.2 s.
+    /// Real takes: rest ≈ 0.02 rad/s (p90 0.05), word peaks 0.10–0.18 rad/s.
+    func captureUntilQuiet(preroll: Double = 0.3, maxWindow: Double = 6, quiet: Double = 0.8,
+                           minActive: Double = 0.3, earliest: Double = 1.0,
+                           activeLevel: Double = 0.07, quietLevel: Double = 0.05) async -> [MotionSample] {
+        let now = latest?.t ?? 0
+        let pre = history.filter { $0.t >= now - preroll }
+        var ema = pre.first?.rotation ?? .zero
+        var smooth = 0.0, prevT = pre.first?.t ?? now
+        var activeTime = 0.0, quietSince: Double?
+        let start = now
+        return await withCheckedContinuation { continuation in
+            let c = Capture(end: now + maxWindow, samples: pre, continuation: continuation)
+            c.shouldEnd = { s in
+                let dt = max(0, min(0.1, s.t - prevT)); prevT = s.t
+                ema = ema + (s.rotation - ema) * min(1, dt / 0.6)          // slow drift estimate
+                let e = (s.rotation - ema).length
+                smooth += (e - smooth) * min(1, dt / 0.1)                   // ~0.2 s smoothing
+                if smooth > activeLevel { activeTime += dt; quietSince = nil }
+                else if smooth < quietLevel { quietSince = quietSince ?? s.t }
+                guard s.t - start > earliest, activeTime >= minActive, let q = quietSince else { return false }
+                return s.t - q >= quiet
+            }
+            captures.append(c)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(maxWindow + 1.5))
                 self?.finish(c)
                 self?.captures.removeAll { $0.done }
             }

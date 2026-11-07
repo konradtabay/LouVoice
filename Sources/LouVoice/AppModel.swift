@@ -28,6 +28,7 @@ final class AppModel {
     let hub = MotionHub()
     let cues = CueService()
     let stem = StemPress()
+    let voice = VoiceService()
     @ObservationIgnored private(set) lazy var enrollment = Enrollment(model: self)
     @ObservationIgnored private(set) lazy var decoder = Decoder(model: self)
 
@@ -77,6 +78,8 @@ final class AppModel {
         hub.start()
         installKeyMonitor()
         rebuildClassifier()
+        voice.refreshCache(words: words)
+        if voice.isConfigured { Task { await voice.prepare(words: words) } }
     }
 
     var isSimulated: Bool { hub.isSimulated }
@@ -127,7 +130,7 @@ final class AppModel {
     func addTake(_ take: Take, features: SegmentFeatures) {
         dataset.takes.append(take)
         featureCache[take.id] = features
-        persist(retrain: !take.isTest)
+        persist(retrain: !take.isTest && !take.isSentence)
     }
 
     func deleteTakes(where predicate: (Take) -> Bool) {
@@ -151,6 +154,8 @@ final class AppModel {
         guard !word.isEmpty, word != noneLabel, !dataset.vocabulary.contains(word) else { return }
         dataset.vocabulary.append(word)
         DatasetStore.save(dataset, simulated: isSimulated)
+        // New words get their voice audio generated right away (PRD: cache at enrollment).
+        if voice.isConfigured { Task { await voice.prepare(words: words) } }
     }
 
     func removeWord(_ word: String) {
@@ -169,19 +174,27 @@ final class AppModel {
 
     // MARK: Training / evaluation
 
-    func trainingFeatures(excludingBlock block: String? = nil) -> [LabeledFeatures] {
-        dataset.trainingTakes.filter { $0.block != block }.compactMap { take in
-            features(for: take).map { LabeledFeatures(id: take.id.uuidString, label: take.label, features: $0.sequence) }
-        }
+    /// Everything needed to build training features off the main thread: raw takes, the cached
+    /// features of real takes, and the config. Noisy copies (D42) are made in `buildTraining`.
+    func trainingInputs(excludingBlock block: String? = nil) -> (takes: [Tuner.RawTake], cached: [String: FeatureSequence], config: PipelineConfig) {
+        let takes = dataset.trainingTakes.filter { $0.block != block }
+        var cached: [String: FeatureSequence] = [:]
+        for t in takes { if let f = features(for: t) { cached[t.id.uuidString] = f.sequence } }
+        return (takes.map(Tuner.RawTake.init), cached, config)
+    }
+
+    nonisolated static func buildTraining(_ input: (takes: [Tuner.RawTake], cached: [String: FeatureSequence], config: PipelineConfig)) -> [LabeledFeatures] {
+        TrainingSet.build(input.takes, config: input.config) { input.cached[$0.id] }
     }
 
     func rebuildClassifier() {
         rebuildTask?.cancel()
-        let training = trainingFeatures()
-        let classifierConfig = config.classifier
+        let input = trainingInputs()
         isTraining = true
         rebuildTask = Task { [weak self] in
-            let built = await Task.detached(priority: .userInitiated) { Classifier(training: training, config: classifierConfig) }.value
+            let built = await Task.detached(priority: .userInitiated) {
+                Classifier(training: AppModel.buildTraining(input), config: input.config.classifier)
+            }.value
             guard !Task.isCancelled, let self else { return }
             self.classifier = built
             self.isTraining = false

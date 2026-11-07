@@ -11,12 +11,15 @@ public struct Take: Codable, Identifiable, Hashable, Sendable {
     public var samples: [MotionSample]
     /// Quiz take: held out from training and used only to measure accuracy (D31).
     public var isTest = false
+    /// Whole-sentence capture (label = the phrase). Its words are stored as separate word takes (D40).
+    public var isSentence = false
 
-    public init(label: String, block: String, session: String, samples: [MotionSample], isTest: Bool = false) {
-        self.label = label; self.block = block; self.session = session; self.samples = samples; self.isTest = isTest
+    public init(label: String, block: String, session: String, samples: [MotionSample], isTest: Bool = false, isSentence: Bool = false) {
+        self.label = label; self.block = block; self.session = session; self.samples = samples
+        self.isTest = isTest; self.isSentence = isSentence
     }
 
-    enum CodingKeys: String, CodingKey { case id, label, block, session, createdAt, samples, isTest }
+    enum CodingKeys: String, CodingKey { case id, label, block, session, createdAt, samples, isTest, isSentence }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -27,6 +30,7 @@ public struct Take: Codable, Identifiable, Hashable, Sendable {
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         samples = try c.decode([MotionSample].self, forKey: .samples)
         isTest = try c.decodeIfPresent(Bool.self, forKey: .isTest) ?? false
+        isSentence = try c.decodeIfPresent(Bool.self, forKey: .isSentence) ?? false
     }
 
     public static func == (a: Take, b: Take) -> Bool { a.id == b.id }
@@ -47,8 +51,9 @@ public struct Dataset: Codable, Sendable {
     public static let defaultVocabulary = ["hello", "can", "you", "hear", "me"]
     public static let empty = Dataset(vocabulary: defaultVocabulary, takes: [], noiseFloor: nil)
 
-    public var trainingTakes: [Take] { takes.filter { !$0.isTest } }
-    public var testTakes: [Take] { takes.filter(\.isTest) }
+    public var trainingTakes: [Take] { takes.filter { !$0.isTest && !$0.isSentence } }
+    public var testTakes: [Take] { takes.filter { $0.isTest && !$0.isSentence } }
+    public var sentenceTakes: [Take] { takes.filter(\.isSentence) }
 }
 
 /// Everything that changes what the recognizer sees or how it decides (D29).
@@ -58,9 +63,13 @@ public struct PipelineConfig: Codable, Hashable, Sendable {
     public var quality = QualityConfig()
     /// Next-word prediction used when decoding (D37).
     public var context = ContextModel()
+    /// Whole-sentence segmentation (D40).
+    public var sentence = SentenceConfig()
+    /// Movement robustness (D42).
+    public var robustness = RobustnessConfig()
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case features, classifier, quality, context }
+    enum CodingKeys: String, CodingKey { case features, classifier, quality, context, sentence, robustness }
     // Tolerant decoding so saved settings survive new fields.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -68,6 +77,8 @@ public struct PipelineConfig: Codable, Hashable, Sendable {
         classifier = (try? c.decode(ClassifierConfig.self, forKey: .classifier)) ?? ClassifierConfig()
         quality = (try? c.decode(QualityConfig.self, forKey: .quality)) ?? QualityConfig()
         context = (try? c.decode(ContextModel.self, forKey: .context)) ?? ContextModel()
+        sentence = (try? c.decode(SentenceConfig.self, forKey: .sentence)) ?? SentenceConfig()
+        robustness = (try? c.decode(RobustnessConfig.self, forKey: .robustness)) ?? RobustnessConfig()
     }
     public static let defaults = PipelineConfig()
 

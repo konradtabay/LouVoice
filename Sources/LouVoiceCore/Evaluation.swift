@@ -69,7 +69,7 @@ public enum Evaluation {
             let refs = Classifier.buildReferences(train.map { asLabeled[$0] }, scales: scales, config: config)
                 .map { (owner: train[$0.owner], seq: $0.sequence) }
             for i in test {
-                let q = Features.scaled(takes[i].features, by: scales)
+                let q = Features.scaled(takes[i].features, by: scales, clip: config.softClip)
                 var list: [(owner: Int, d: Double)] = []
                 list.reserveCapacity(refs.count)
                 for r in refs where !(excludeSelf && r.owner == i) {

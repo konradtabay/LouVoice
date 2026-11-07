@@ -20,7 +20,16 @@ final class Decoder {
         var motionBest: String?
         /// The previous word context used, nil = start of phrase.
         var contextWord: String?
+        /// End of mouthed word → start of audio, seconds (PRD target < 1.5 s), and how it was voiced.
+        var voiceDelay: Double?
+        var voiceSource: VoiceService.Source?
+        /// Sentence mode: the decoded words with their segments and alternatives (D40).
+        var sentence: LouVoiceCore.SentenceResult?
+        var isSentence: Bool { sentence != nil }
     }
+
+    /// PRD success test: end of mouthed word to start of audio.
+    static let delayTarget = 1.5
 
     enum Phase: Equatable { case idle, recording, thinking, confirming(until: Date) }
 
@@ -33,6 +42,8 @@ final class Decoder {
     var maxScore: Double = 3.0
     var minMargin: Double = 0.0
     var speakResult = true
+    /// One press = a whole sentence (D40). Off = the original one-word-per-press mode (kept as fallback).
+    var sentenceMode = true
     var addConfirmedToTraining = true
     /// Simulator only: what the fake user mouths on the next trigger (nil = random active word).
     var simulatedWord: String?
@@ -74,6 +85,7 @@ final class Decoder {
     func clear() { results.removeAll(); resetContext() }
 
     func trigger() {
+        if sentenceMode { triggerSentence(); return }
         guard phase == .idle || isConfirming, let classifier = model.classifier else { return }
         if isConfirming { finishConfirm(.unconfirmed) }
         let hub = model.hub, cues = model.cues
@@ -88,12 +100,14 @@ final class Decoder {
                 hub.simulate(simWord.map { .word($0) })
             }
             let samples = await hub.capture(preroll: self.model.capture.preroll, window: self.model.capture.window)
+            let captureEnd = Date()
             cues.play(.end)
             self.phase = .thinking
             guard let features = Features.extract(samples, config: self.model.config.features) else {
                 self.phase = .idle
                 return
             }
+            if self.rejectForHeadMovement(features, samples: samples) { return }
             let active = self.activeWords.isEmpty ? nil : self.activeWords
             let (maxScore, minMargin) = (self.maxScore, self.minMargin)
             let context = self.model.config.context, previous = self.currentContext
@@ -113,8 +127,17 @@ final class Decoder {
             var result = Result(prediction: prediction, outcome: .pending, samples: samples,
                                 features: features, simulatedWord: simWord, motionBest: motionBest, contextWord: previous)
             if prediction.accepted, let word = prediction.best?.label {
-                if self.speakResult { cues.say(word) }
                 self.results.insert(result, at: 0)
+                if self.speakResult {
+                    let spoken = await self.model.voice.speak(word)
+                    // Quiet tail of the window after the word + processing + time to start playback.
+                    // Bluetooth output latency (~0.1–0.2 s) comes on top and isn't measurable here.
+                    let delay = features.trailingSeconds + Date().timeIntervalSince(captureEnd)
+                    if let i = self.results.firstIndex(where: { $0.id == result.id }) {
+                        self.results[i].voiceDelay = delay
+                        self.results[i].voiceSource = spoken.source
+                    }
+                }
                 self.startConfirm()
             } else {
                 result.outcome = .discarded
@@ -123,6 +146,82 @@ final class Decoder {
                 self.phase = .idle
             }
         }
+    }
+
+    /// Sentence mode: beep, mouth the whole sentence, every word comes out in order.
+    private func triggerSentence() {
+        guard phase == .idle || isConfirming, let classifier = model.classifier else { return }
+        if isConfirming { finishConfirm(.unconfirmed) }
+        let hub = model.hub, cues = model.cues, config = model.config
+        guard let decoder = SentenceDecoder(classifier: classifier, pipeline: config, config: config.sentence) else { return }
+        phase = .recording
+        Task { [weak self] in
+            guard let self else { return }
+            cues.play(.start)
+            var simText: String?
+            if hub.isSimulated, let phrase = config.context.tokenized.first {
+                simText = phrase.joined(separator: " ")
+                Task { @MainActor in for w in phrase { hub.simulate(.word(w)); try? await Task.sleep(for: .milliseconds(520)) } }
+            }
+            let sc = config.sentence
+            let samples = sc.stopWhenQuiet
+                ? await hub.captureUntilQuiet(preroll: self.model.capture.preroll, maxWindow: sc.windowSeconds, quiet: sc.stopAfterQuietSeconds)
+                : await hub.capture(preroll: self.model.capture.preroll, window: sc.windowSeconds)
+            let captureEnd = Date()
+            cues.play(.end)
+            self.phase = .thinking
+            guard let features = Features.extract(samples, config: config.features) else { self.phase = .idle; return }
+            if self.rejectForHeadMovement(features, samples: samples) { return }
+            let active = self.activeWords.isEmpty ? nil : self.activeWords
+            let sentence = await Task.detached(priority: .userInitiated) {
+                decoder.decode(samples, context: config.context, active: active)
+            }.value
+            let words = sentence?.words.map(\.label) ?? []
+            let text = words.joined(separator: " ")
+            let prediction = Prediction(ranked: [RankedLabel(label: text, score: 0)], margin: 1,
+                                        accepted: !words.isEmpty, rejectReason: words.isEmpty ? "No words found" : nil)
+            var result = Result(prediction: prediction, outcome: .pending, samples: samples, features: features,
+                                simulatedWord: simText, contextWord: nil, sentence: sentence)
+            guard !words.isEmpty else {
+                result.outcome = .discarded
+                self.results.insert(result, at: 0)
+                cues.play(.reject); self.phase = .idle
+                return
+            }
+            self.results.insert(result, at: 0)
+            if self.speakResult {
+                let spoken = await self.model.voice.speak(words: words)
+                let delay = (sentence?.trailingSeconds ?? 0) + Date().timeIntervalSince(captureEnd)
+                if let i = self.results.firstIndex(where: { $0.id == result.id }) {
+                    self.results[i].voiceDelay = delay
+                    self.results[i].voiceSource = spoken.source
+                }
+            }
+            self.startConfirm()
+        }
+    }
+
+    /// Correction (sentence mode): replace word `index` of the latest sentence with an alternative.
+    func correct(resultID: UUID, index: Int, to word: String) {
+        guard let i = results.firstIndex(where: { $0.id == resultID }), var s = results[i].sentence, index < s.words.count else { return }
+        s.words[index].label = word
+        results[i].sentence = s
+        let text = s.words.map(\.label).joined(separator: " ")
+        results[i].prediction = Prediction(ranked: [RankedLabel(label: text, score: 0)], margin: 1, accepted: true, rejectReason: nil)
+        results[i].voiceDelay = nil
+    }
+
+    /// "Hold still" gate (D42): with Tune › Robustness › decode head limit set, a capture whose head
+    /// turned more than that is refused with a reason instead of guessed.
+    private func rejectForHeadMovement(_ features: SegmentFeatures, samples: [MotionSample]) -> Bool {
+        let limit = model.config.robustness.decodeMaxHeadDegrees
+        guard limit > 0, features.headRotationDegrees > limit else { return false }
+        let reason = String(format: "Head moved %.0f° — hold still and try again", features.headRotationDegrees)
+        results.insert(Result(prediction: Prediction(ranked: [], margin: 0, accepted: false, rejectReason: reason),
+                              outcome: .discarded, samples: samples, features: features), at: 0)
+        model.cues.play(.reject)
+        phase = .idle
+        return true
     }
 
     var isConfirming: Bool { if case .confirming = phase { true } else { false } }
@@ -165,7 +264,8 @@ final class Decoder {
         phase = .idle
         guard let i = results.firstIndex(where: { $0.outcome == .pending }) else { return }
         results[i].outcome = outcome
-        if outcome == .confirmed || outcome == .unconfirmed, let word = results[i].prediction.best?.label {
+        if outcome == .confirmed || outcome == .unconfirmed,
+           let word = results[i].sentence?.words.last?.label ?? results[i].prediction.best?.label {
             contextWord = word
             contextTime = Date()
         }
@@ -173,7 +273,17 @@ final class Decoder {
         case .confirmed:
             model.cues.play(.accept)
             let r = results[i]
-            if addConfirmedToTraining, let label = r.prediction.best?.label {
+            if addConfirmedToTraining, let sentence = r.sentence {
+                // Confirmed sentence: each decoded segment becomes a word take (D40).
+                let day = String(Enrollment.stamp().prefix(8))
+                for (w, cut) in zip(sentence.words, SentenceDecoder.cut(r.samples, result: sentence)) {
+                    if let f = Features.extract(cut, config: model.config.features) {
+                        model.addTake(Take(label: w.label, block: "confirmed-\(day)", session: day, samples: cut), features: f)
+                    }
+                }
+                model.addTake(Take(label: sentence.text, block: "confirmed-\(day)", session: day, samples: r.samples, isSentence: true),
+                              features: r.features)
+            } else if addConfirmedToTraining, let label = r.prediction.best?.label {
                 // Confirmed decodes become training data (D15), in their own daily block.
                 let day = String(Enrollment.stamp().prefix(8))
                 model.addTake(Take(label: label, block: "confirmed-\(day)", session: day, samples: r.samples),

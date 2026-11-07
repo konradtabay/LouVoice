@@ -13,7 +13,26 @@ public struct ContextModel: Codable, Hashable, Sendable {
     public var temperature: Double = 0.1
     /// Add-α smoothing so out-of-order words stay possible.
     public var smoothing: Double = 0.1
+    /// Also expect any contiguous part of each phrase ("hello can", "you hear me"), in order (D44).
+    public var includeParts: Bool = true
+    /// Shortest part that counts as a phrase of its own.
+    public var minPartWords: Int = 2
+    /// How much a part counts relative to a full phrase (D44).
+    public var partWeight: Double = 1
     public init() {}
+
+    enum CodingKeys: String, CodingKey { case phrases, weight, temperature, smoothing, includeParts, minPartWords, partWeight }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = ContextModel()
+        phrases = try c.decodeIfPresent([String].self, forKey: .phrases) ?? d.phrases
+        weight = try c.decodeIfPresent(Double.self, forKey: .weight) ?? d.weight
+        temperature = try c.decodeIfPresent(Double.self, forKey: .temperature) ?? d.temperature
+        smoothing = try c.decodeIfPresent(Double.self, forKey: .smoothing) ?? d.smoothing
+        includeParts = try c.decodeIfPresent(Bool.self, forKey: .includeParts) ?? d.includeParts
+        minPartWords = try c.decodeIfPresent(Int.self, forKey: .minPartWords) ?? d.minPartWords
+        partWeight = try c.decodeIfPresent(Double.self, forKey: .partWeight) ?? d.partWeight
+    }
 
     public static let start = "<s>"
 
@@ -41,8 +60,23 @@ public struct ContextModel: Codable, Hashable, Sendable {
         set { (weight, temperature) = newValue.values }
     }
 
+    /// The phrases as written.
     public var tokenized: [[String]] {
         phrases.map { $0.lowercased().split(whereSeparator: \.isWhitespace).map(String.init) }.filter { !$0.isEmpty }
+    }
+
+    /// Every sentence the model expects with its weight: the phrases (1) plus, if enabled, their
+    /// contiguous parts (`partWeight` each).
+    public var expectedSentences: [(words: [String], weight: Double)] {
+        let base = tokenized
+        var out = base.map { ($0, 1.0) }
+        guard includeParts else { return out }
+        for words in base where words.count > minPartWords {
+            for len in max(1, minPartWords)..<words.count {
+                for start in 0...(words.count - len) { out.append((Array(words[start..<(start + len)]), partWeight)) }
+            }
+        }
+        return out
     }
 
     /// P(next | previous) over `vocabulary`. `previous == nil` means start of a phrase.

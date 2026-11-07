@@ -51,6 +51,7 @@ struct SmokeTest {
             let d = model.decoder
             var correct = 0
             let trials = words + words.prefix(2)
+            d.sentenceMode = false
             for word in trials {
                 d.simulatedWord = word
                 d.trigger()
@@ -66,6 +67,21 @@ struct SmokeTest {
                 }
                 try? await Task.sleep(for: .milliseconds(300))
             }
+            // 5. Sentence training (1 block × 2) and sentence decode ×2 with nod (D40).
+            e.startSentences(phrase: "yes banana hello stop", reps: 2, blocks: 1)
+            while e.isRunning { try? await Task.sleep(for: .milliseconds(200)) }
+            let derived = model.dataset.takes.filter { $0.block.hasPrefix("sentence-") && !$0.isSentence }.count
+            log("smoke: sentence training \(e.sentenceResults.map { $0.heard.joined(separator: " ") }) derived word takes=\(derived) sentence takes=\(model.dataset.sentenceTakes.count)")
+            model.updateConfig { $0.context.phrases = ["yes banana hello stop"] }
+            while model.classifier == nil || model.isTraining { try? await Task.sleep(for: .milliseconds(100)) }
+            d.sentenceMode = true
+            for _ in 0..<2 {
+                d.trigger()
+                while d.phase == .recording || d.phase == .thinking { try? await Task.sleep(for: .milliseconds(50)) }
+                if d.isConfirming { d.simulateGesture(.nod); while d.isConfirming { try? await Task.sleep(for: .milliseconds(50)) } }
+                if let r = d.results.first { log("smoke: sentence decode got=\"\(r.sentence?.text ?? "-")\" outcome=\(r.outcome.rawValue)") }
+            }
+
             let confirmed = model.dataset.takes.filter { $0.block.hasPrefix("confirmed-") }.count
             log("smoke: decode \(correct)/\(trials.count) correct, \(confirmed) confirmed takes added to training")
             log("smoke: transcript=\"\(d.transcript)\"")

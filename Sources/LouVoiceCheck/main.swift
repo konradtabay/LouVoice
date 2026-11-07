@@ -56,9 +56,28 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
         }
     }
 
+    if args.contains("--lengths") {
+        // How long each trained word is after trimming (the sentence decoder needs segments ≥ 0.5× a template).
+        var by: [String: [Double]] = [:]
+        for t in dataset.trainingTakes where t.label != noneLabel {
+            if let f = Features.extract(t.samples) { by[t.label, default: []].append(Double(f.sequence.count) / 25) }
+        }
+        for (w, ls) in by.sorted(by: { $0.key < $1.key }) {
+            let s = ls.sorted()
+            print(String(format: "%-6@ n=%3d  trimmed length median %.2f s  p10 %.2f  p90 %.2f  → shortest allowed sentence segment %.2f s",
+                         w, s.count, s[s.count / 2], s[s.count / 10], s[s.count * 9 / 10], s[s.count / 10] * 0.5))
+        }
+        exit(0)
+    }
+
     if args.contains("--quality") {
         // Take strength (D32) for every recorded take under the current defaults.
         let q = QualityConfig()
+        let tails = dataset.takes.filter { $0.label != noneLabel }.compactMap { Features.extract($0.samples)?.trailingSeconds }.sorted()
+        if !tails.isEmpty {
+            print(String(format: "quiet time after the word, inside the 1.8 s window: median %.2f s, p90 %.2f s, max %.2f s",
+                         tails[tails.count / 2], tails[Int(Double(tails.count) * 0.9)], tails.last!))
+        }
         let strengths = dataset.takes.compactMap { t in Features.extract(t.samples).map { (t.label, Quality.strength($0)) } }
         for group in ["words", noneLabel] {
             let g = strengths.filter { group == "words" ? $0.0 != noneLabel : $0.0 == noneLabel }.map(\.1).sorted()
@@ -140,6 +159,125 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
         for strength in ContextModel.Strength.allCases {
             var c = ContextModel(); c.strength = strength
             show(strength.label.padding(toLength: 33, withPad: " ", startingAt: 0), c)
+        }
+        exit(0)
+    }
+
+    // --robust: accuracy when real recorded movement is mixed into held-out words, with fixes (D42).
+    if args.contains("--robust") {
+        let strengths = [0.0, 0.25, 0.5, 1.0]
+        func variant(_ name: String, _ change: (inout PipelineConfig) -> Void) -> (String, PipelineConfig) {
+            var c = PipelineConfig.defaults; change(&c); return (name, c)
+        }
+        var variants = [
+            variant("baseline") { _ in },
+            variant("noise training ×2") { $0.robustness.noiseCopies = 2 },
+            variant("noise ×2 + clip 3σ") { $0.robustness.noiseCopies = 2; $0.classifier.softClip = 3 },
+            variant("noise ×4 + clip 3σ") { $0.robustness.noiseCopies = 4; $0.classifier.softClip = 3 },
+            variant("noise ×4 (0.2–1.0) + clip 3σ") { $0.robustness.noiseCopies = 4; $0.robustness.minStrength = 0.2; $0.robustness.maxStrength = 1.0; $0.classifier.softClip = 3 },
+            variant("noise ×6 (0.2–1.0) + clip 3σ") { $0.robustness.noiseCopies = 6; $0.robustness.minStrength = 0.2; $0.robustness.maxStrength = 1.0; $0.classifier.softClip = 3 },
+            variant("noise ×4 (0.2–1.0) + clip 3σ, aug ×4") { $0.robustness.noiseCopies = 4; $0.robustness.minStrength = 0.2; $0.robustness.maxStrength = 1.0; $0.classifier.softClip = 3; $0.classifier.augmentCopies = 4 },
+        ]
+        if args.contains("--quick") { variants = Array(variants.prefix(1)) }
+        print("words accuracy with recorded movement mixed in at strength: " + strengths.map { String(format: "%.2f", $0) }.joined(separator: " / "))
+        for (name, c) in variants {
+            let rows = Tuner.robustness(train, config: c, strengths: strengths)
+            print(name.padding(toLength: 28, withPad: " ", startingAt: 0) + rows.map { String(format: "%3.0f%%", $0.words * 100) }.joined(separator: "  "))
+        }
+        for gate in args.contains("--gate") ? [15.0, 10.0] : [] {
+            let rows = Tuner.robustness(train, config: .defaults, strengths: strengths, gateDegrees: gate)
+            print(String(format: "baseline + head gate %2.0f°      ", gate) + rows.map { String(format: "%3.0f%% (answers %3.0f%%)", $0.gated * 100, $0.answered * 100) }.joined(separator: "  "))
+        }
+        exit(0)
+    }
+
+    // --parts: parts of the phrase ("hello can", "you hear me") vs the full phrase (D44).
+    if args.contains("--parts") {
+        let phrase = ContextModel().tokenized.first ?? []
+        var parts: [[String]] = []
+        for len in 2...phrase.count { for st in 0...(phrase.count - len) { parts.append(Array(phrase[st..<(st + len)])) } }
+        for (pw, penalty) in [(0.0, 0.0), (1.0, 0.0), (0.2, 0.0), (0.2, -1.5), (0.1, -1.5), (0.2, -3.0), (0.05, -3.0)] {
+            var ctx = ContextModel(); ctx.strength = .strong; ctx.includeParts = pw > 0; ctx.partWeight = pw
+            var sc = SentenceConfig(); sc.insertionPenalty = penalty
+            var cells: [String] = []
+            for (name, sentences) in [("full", [phrase]), ("parts", parts)] {
+                for speed in [1.0, 2.0] {
+                    if let b = Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: ctx, speed: speed, perBlock: 8, sentences: sentences) {
+                        cells.append(String(format: "%@ ×%.0f %3.0f%%/%3.0f%%", name, speed, b.wordAccuracy * 100, b.exact * 100))
+                    }
+                }
+            }
+            print(String(format: "part weight %.2f, word penalty %+.1f | ", pw, penalty) + cells.joined(separator: " | "))
+        }
+        exit(0)
+    }
+
+    // --honesty: does the phrase model still read the motion? (D41)
+    if args.contains("--honesty") {
+        let phrase = ContextModel().tokenized.first ?? []
+        let extra = [["hello"], ["can", "you", "hear", "me"], ["hear", "me"], phrase]
+        for penalty in args.contains("--quick") ? [0.0] : [0.0, 1.0, 2.0] {
+            var sc = SentenceConfig(); sc.insertionPenalty = penalty
+            for strength in args.contains("--quick") ? [ContextModel.Strength.off, .strong] : [ContextModel.Strength.off, .balanced, .strong] {
+                var one = ContextModel(); one.strength = strength
+                var many = one; many.phrases = extra.map { $0.joined(separator: " ") }
+                let rows: [(String, Tuner.SentenceBenchmark?)] = [
+                    ("phrase, normal", Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: one, perBlock: 10)),
+                    ("phrase, 1.33x", Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: one, speed: 1.33, perBlock: 10)),
+                    ("4 phrases known, say any", Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: many, perBlock: 10, sentences: extra)),
+                    ("off-script random 3-5 words", Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: one, perBlock: 10, randomLength: 3...5)),
+                ]
+                let cells = rows.map { name, b in b.map { String(format: "%@ %.0f%%/%.0f%%", name, $0.wordAccuracy * 100, $0.exact * 100) } ?? "\(name) -" }
+                print(String(format: "penalty %.0f · %-8@ | ", penalty, strength.label) + cells.joined(separator: " | "))
+            }
+        }
+        print("(cells: words / whole sentence right)")
+        exit(0)
+    }
+
+    // --speed: sentence accuracy as speech gets faster, for several squash limits (D43).
+    if args.contains("--speed") {
+        let phrase = ContextModel().tokenized.first ?? []
+        var strong = ContextModel(); strong.strength = .strong
+        for (comp, minWord) in [(0.5, 0.16), (0.35, 0.12), (0.25, 0.08), (0.2, 0.08)] {
+            var sc = SentenceConfig(); sc.minCompression = comp; sc.minWordSeconds = minWord
+            var cells: [String] = []
+            for speed in [1.0, 1.5, 2.0, 2.5, 3.0] {
+                if let b = Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: strong, speed: speed, perBlock: 8) {
+                    cells.append(String(format: "×%.1f %3.0f%%/%3.0f%%", speed, b.wordAccuracy * 100, b.exact * 100))
+                }
+            }
+            print(String(format: "squash ≥%.2f, word ≥%.2fs | ", comp, minWord) + cells.joined(separator: " | "))
+        }
+        print("(speed = how much faster than your isolated words; cells = words / whole sentence)")
+        exit(0)
+    }
+
+    // --sentences: stitched-sentence benchmark of the sentence decoder (D40).
+    if args.contains("--sentences") {
+        let phrase = ContextModel().tokenized.first ?? []
+        var strong = ContextModel(); strong.strength = .strong
+        var off = ContextModel(); off.strength = .off
+        var grid: [(String, SentenceConfig)] = [("defaults", SentenceConfig())]
+        if args.contains("--grid") {
+            grid = []
+            for ip in [0.0, 1.5, 3.0, 6.0] { for cw in [0.0, 1.0, 2.0, 4.0] {
+                var c = SentenceConfig(); c.insertionPenalty = ip; c.contextWeight = cw / 0.5   // Strong = weight 0.5
+                grid.append((String(format: "insert %.1f ctx %.1f", ip, cw), c))
+            } }
+        }
+        for (name, sc) in grid {
+            for (cname, ctx) in [("strong", strong), ("off", off)] where !(cname == "off" && args.contains("--grid")) {
+                for speed in [1.0, 1.33] {
+                    guard let b = Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: ctx, speed: speed, perBlock: args.contains("--grid") ? 6 : 12) else { continue }
+                    print(String(format: "%@ · context %@ · speed ×%.2f → words %.0f%%  whole sentence %.0f%%  | align: boundary err %.0f ms, all-boundaries-ok %.0f%%  | %.2f s/decode (n=%d)",
+                                 name, cname, speed, b.wordAccuracy * 100, b.exact * 100, b.boundaryErrorMs, b.alignedExact * 100, b.decodeSeconds, b.sentences))
+                    if args.contains("--failures"), cname == "strong" {
+                        let counts = Dictionary(grouping: b.failures, by: { $0 }).mapValues(\.count).sorted { $0.value > $1.value }
+                        for (heard, n) in counts.prefix(10) { print("     ×\(n)  heard: \"\(heard)\"") }
+                    }
+                }
+            }
         }
         exit(0)
     }
