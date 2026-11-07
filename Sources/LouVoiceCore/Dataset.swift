@@ -55,7 +55,17 @@ public struct Dataset: Codable, Sendable {
 public struct PipelineConfig: Codable, Hashable, Sendable {
     public var features = FeatureConfig()
     public var classifier = ClassifierConfig()
+    public var quality = QualityConfig()
     public init() {}
+
+    enum CodingKeys: String, CodingKey { case features, classifier, quality }
+    // Tolerant decoding so saved settings survive new fields.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        features = (try? c.decode(FeatureConfig.self, forKey: .features)) ?? FeatureConfig()
+        classifier = (try? c.decode(ClassifierConfig.self, forKey: .classifier)) ?? ClassifierConfig()
+        quality = (try? c.decode(QualityConfig.self, forKey: .quality)) ?? QualityConfig()
+    }
     public static let defaults = PipelineConfig()
 
     /// Short human-readable summary.

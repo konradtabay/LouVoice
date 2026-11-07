@@ -45,6 +45,19 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
         print("  most confused:", r.confusedPairs.prefix(5).map { "\($0.a)↔\($0.b)×\($0.count)" }.joined(separator: ", "))
     }
 
+    if args.contains("--quality") {
+        // Take strength (D32) for every recorded take under the current defaults.
+        let q = QualityConfig()
+        let strengths = dataset.takes.compactMap { t in Features.extract(t.samples).map { (t.label, Quality.strength($0)) } }
+        for group in ["words", noneLabel] {
+            let g = strengths.filter { group == "words" ? $0.0 != noneLabel : $0.0 == noneLabel }.map(\.1).sorted()
+            func pct(_ p: Double) -> Double { g.isEmpty ? 0 : g[min(g.count - 1, Int(Double(g.count) * p))] }
+            print(String(format: "%-6@ n=%2d  strength min %.1f p10 %.1f p50 %.1f  below %.1f×: %d",
+                         group, g.count, g.first ?? 0, pct(0.1), pct(0.5), q.minStrength, g.filter { $0 < q.minStrength }.count))
+        }
+        exit(0)
+    }
+
     var old = PipelineConfig.defaults
     old.features.highPassHz = 0.8; old.classifier.augmentCopies = 4
     report("original defaults (HP 0.8 Hz, aug ×4)", old)

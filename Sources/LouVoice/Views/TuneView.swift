@@ -59,6 +59,16 @@ struct TuneView: View {
                 labeledSlider("DTW band", value: binding({ $0.classifier.band }, { $0.classifier.band = $1 }),
                               range: 0.05...0.5, step: 0.05, format: String(format: "%.0f%%", c.classifier.band * 100))
             }
+            SectionCard(title: "Quality gate (new takes only)") {
+                Toggle("Reject takes that are too subtle", isOn: binding({ $0.quality.checkStrength }, { $0.quality.checkStrength = $1 }))
+                labeledSlider("Min strength", value: binding({ $0.quality.minStrength }, { $0.quality.minStrength = $1 }),
+                              range: 1.5...8, step: 0.5, format: String(format: "%.1f×", c.quality.minStrength))
+                Toggle("Reject head movement", isOn: binding({ $0.quality.checkHeadMovement }, { $0.quality.checkHeadMovement = $1 }))
+                labeledSlider("Max head movement", value: binding({ $0.quality.maxHeadDegrees }, { $0.quality.maxHeadDegrees = $1 }),
+                              range: 5...40, step: 1, format: String(format: "%.0f°", c.quality.maxHeadDegrees))
+                Text("Strength = peak jaw activity ÷ the take's own quiet part. Your recorded words range 3.4×–20×, median 8×.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             SectionCard(title: "Capture (new takes only)") {
                 labeledSlider("Window", value: $model.capture.window, range: 1.0...3.0, step: 0.1,
                               format: String(format: "%.1f s", model.capture.window))

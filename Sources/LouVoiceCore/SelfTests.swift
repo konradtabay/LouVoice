@@ -158,14 +158,19 @@ public enum SelfTests {
 
     static func quality() throws {
         let sim = MotionSimulator(seed: 2); sim.dropProbability = 0
-        let floor = Features.noiseFloor(sim.recordTake(nil, preroll: 0, window: 2))
-        let word = Features.extract(sim.recordTake(.word("banana")))!
-        try expect(Quality.check(word, noiseFloor: floor, isNone: false) == nil, "good take rejected")
+        for word in ["banana", "yes", "me"] {
+            let take = Features.extract(sim.recordTake(.word(word)))!
+            try expect(Quality.check(take, isNone: false) == nil,
+                       "good take '\(word)' rejected: \(Quality.check(take, isNone: false) ?? "")")
+        }
         let turn = Features.extract(sim.recordTake(.noise(.turn)))!
-        try expect(Quality.check(turn, noiseFloor: floor, isNone: false) != nil, "head turn accepted as a word take")
-        try expect(Quality.check(turn, noiseFloor: floor, isNone: true) == nil, "head turn rejected as a noise take")
-        let still = Features.extract(sim.recordTake(nil))!
-        try expect(Quality.check(still, noiseFloor: floor, isNone: false) != nil, "still take accepted")
+        try expect(Quality.check(turn, isNone: false) != nil, "head turn accepted as a word take")
+        try expect(Quality.check(turn, isNone: true) == nil, "head turn rejected as a noise take")
+        for _ in 0..<5 {
+            let still = Features.extract(sim.recordTake(nil))!
+            try expect(Quality.check(still, isNone: false) != nil,
+                       String(format: "still take accepted (strength %.1f)", Quality.strength(still)))
+        }
     }
 
     static func codable() throws {

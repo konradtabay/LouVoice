@@ -193,9 +193,6 @@ private struct PromptCard: View {
                 Image(systemName: "airpodspro").font(.system(size: 54)).foregroundStyle(.secondary)
                 Text("Ready to train").font(.title2.weight(.semibold))
                 coaching
-            case .calibrating:
-                Text("Stay still").font(.system(size: 54, weight: .bold, design: .rounded))
-                Text("Measuring the resting noise floor…").foregroundStyle(.secondary)
             case .ready(let p, let quiz):
                 quizTag(quiz)
                 Text(p.text).font(.system(size: p.label == noneLabel ? 36 : 72, weight: .bold, design: .rounded))

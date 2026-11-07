@@ -30,7 +30,6 @@ final class Enrollment {
 
     enum Phase: Equatable {
         case idle
-        case calibrating
         case ready(Prompt, quiz: Bool)
         case recording(Prompt, quiz: Bool)
         case feedback(ok: Bool, message: String, heard: String?, correct: Bool?)
@@ -123,16 +122,7 @@ final class Enrollment {
     private func run(words: [String], reps: Int, blocks: Int, noise: Int, session: String, prefix: String, quizzes: Bool) async {
         let hub = model.hub, cues = model.cues
 
-        if mode == .train, model.dataset.noiseFloor == nil || prefix == "enroll" {
-            phase = .calibrating
-            cues.say("Stay still for two seconds")
-            try? await Task.sleep(for: .seconds(1.2))
-            cues.play(.start)
-            let rest = await hub.capture(preroll: 0, window: 2.0)
-            cues.play(.end)
-            model.setNoiseFloor(Features.noiseFloor(rest, config: model.config.features))
-            if Task.isCancelled { return }
-        }
+        // No separate "stay still" calibration: the strength check is self-normalising (D32).
 
         for b in 1...blocks {
             block = b
@@ -205,7 +195,7 @@ final class Enrollment {
                 queue.append(prompt)
                 continue
             }
-            if let problem = Quality.check(features, noiseFloor: model.dataset.noiseFloor, isNone: isNone) {
+            if let problem = Quality.check(features, config: model.config.quality, isNone: isNone) {
                 rejected += 1
                 prompt.attempts += 1
                 log.insert("✗ \(prompt.text): \(problem)", at: 0)
