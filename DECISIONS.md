@@ -210,3 +210,31 @@ Chance is 20%, and p = 0.005 in both cases, so the motion carries real word info
 **Decision:** A take's **strength** is its smoothed peak activity divided by its own 20th-percentile activity. The capture window is about 2 s and a word fills about 0.5 s, so the 20th percentile is the take's own rest. Word takes need strength ≥ **3×** (tunable). The "Stay still" calibration is removed from enrollment. Thresholds for strength and head movement are now on the Tune screen, and rejection messages show the measured value.
 **Why:** The user hit "Too subtle" on most takes. The stored calibration floor was **0.74**, ten times the first session's 0.07: that calibration window must have caught movement. Against it, all 49 recorded word takes scored about 0.3 when 2.5 was required, so the gate would reject every real word. Raising the high-pass to 1.6 Hz (D30) also shrank word energy relative to sensor noise, which tightens a fixed floor further. A one-off calibration is a single point of failure; a per-take ratio can't be poisoned by it.
 **Evidence** (`LouVoiceCheck --eval … --quality`, 66 real takes): word strength min 3.4×, p10 4.9×, median 8.3×, so **0 of 49 words** fall below 3×. Simulated still takes stay below 3× and are rejected (self-test).
+
+### D33: Second session: pooled data matters most; new defaults (2026-11-07). *Amends D30.*
+**Data:** After a reset, session 2 had 57 training takes in 3 blocks plus 15 quiz takes. Session 1 (66 takes, 6 blocks) was kept as a backup.
+
+**Findings** (leave-one-block-out on words unless noted):
+- **Session 2 at the D30 defaults scored 38% on words** (47% overall). The 68% from session 1 was partly luck and partly over-tuning to one session.
+- **Models don't transfer across days.** Train on one session and test on the other: 35% and 44%, with words near chance.
+- **Pooling both sessions** (123 takes, 9 blocks) gives 61% overall and 51% words at the old defaults, and up to 69% / 66% after auto-tune. Variety across sessions is what the model needs. **Future sessions should add to the data, not replace it.**
+- Across pooled data and both single sessions, one setting was consistently at or near the top: **rotation + attitude only** (dropping the accelerometer), **high-pass 1.2 Hz**, **35% trim**, plus the new **magnitude channels**.
+
+**Decision:** These are the new defaults (k=3, aug ×8 unchanged).
+
+| Data | Old words | New words | Quiz |
+|---|---|---|---|
+| Pooled | 51% | 61% | 11/15 |
+| Session 2 | 38% | 42% | 12/15 |
+| Session 1 | 55% | 57% | n/a |
+
+Not taken: k=1 and 50 Hz (same within noise), and the single auto-tune winner (69%), which was chosen from 83 trials.
+
+**New options** (D33, on the Tune screen and in auto-tune):
+- per-take normalisation (off / per take / per take and channel)
+- rate-of-change channels
+- rotation-free magnitude channels
+
+Only magnitudes helped. `FeatureSequence.vectorDims` keeps augmentation from rotating scalar channels.
+
+**Tools:** `LouVoiceCheck --eval A.json --merge B.json` pools sessions. `--cross B.json` trains on A and tests on B. `--candidates` compares a fixed shortlist of settings, to avoid trusting one winner.

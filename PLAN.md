@@ -133,7 +133,7 @@ A synthetic AirPods source inside `LouVoiceCore` that can be switched on in the 
 
 ## 8. Milestones & acceptance
 
-**Status (2026-11-07):** M1 ✅, M2 ✅ (streams at 50 Hz), M3 ✅ (`--smoke`). **M4 first real session: 59 takes, leave-block-out 49% at the original defaults, 68% after tuning** (D30); chance is 20%, p = 0.005. Now in progress: M5, more blocks and quizzes to confirm, tuning and vocabulary.
+**Status (2026-11-07):** M1 ✅, M2 ✅ (streams at 50 Hz), M3 ✅ (`--smoke`). **M4 first real session: 59 takes, leave-block-out 49% at the original defaults, 68% after tuning** (D30); chance is 20%, p = 0.005. Session 2 (after a reset): 42% words alone, **61% words with both sessions pooled**, and models don't transfer across days (D33). Now in progress: M5, accumulating sessions rather than resetting.
 
 | # | Milestone | Done when |
 |---|---|---|

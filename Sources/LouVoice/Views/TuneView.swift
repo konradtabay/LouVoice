@@ -31,6 +31,11 @@ struct TuneView: View {
                 labeledSlider("High-pass", value: binding({ $0.features.highPassHz }, { $0.features.highPassHz = $1 }),
                               range: 0...3, step: 0.1, format: c.features.highPassHz == 0 ? "off" : String(format: "%.1f Hz", c.features.highPassHz))
                 Toggle("Re-seat correction (gravity)", isOn: binding({ $0.features.canonicalize }, { $0.features.canonicalize = $1 }))
+                Picker("Normalise each take", selection: binding({ $0.features.normalization }, { $0.features.normalization = $1 })) {
+                    ForEach(FeatureConfig.Normalization.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Toggle("Add rate-of-change channels", isOn: binding({ $0.features.derivatives }, { $0.features.derivatives = $1 }))
+                Toggle("Add magnitude channels (rotation-free)", isOn: binding({ $0.features.magnitudes }, { $0.features.magnitudes = $1 }))
                 Text("Channels").font(.subheadline)
                 HStack {
                     channelToggle("Accel", .acceleration)

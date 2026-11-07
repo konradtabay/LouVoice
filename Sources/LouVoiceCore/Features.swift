@@ -4,12 +4,17 @@ import Foundation
 public struct FeatureSequence: Sendable, Hashable {
     public var values: [Double]
     public let dims: Int
+    /// Leading dims that are xyz vectors (rotated by augmentation); the rest are scalars.
+    public var vectorDims: Int
     public var count: Int { dims == 0 ? 0 : values.count / dims }
 
-    public init(values: [Double], dims: Int) { self.values = values; self.dims = dims }
-    public init(frames: [[Double]]) {
+    public init(values: [Double], dims: Int, vectorDims: Int? = nil) {
+        self.values = values; self.dims = dims; self.vectorDims = vectorDims ?? dims
+    }
+    public init(frames: [[Double]], vectorDims: Int? = nil) {
         dims = frames.first?.count ?? 0
         values = frames.flatMap { $0 }
+        self.vectorDims = vectorDims ?? dims
     }
     public subscript(frame i: Int, dim d: Int) -> Double {
         get { values[i * dims + d] }
@@ -41,21 +46,57 @@ public struct FeatureConfig: Codable, Hashable, Sendable {
     /// Resampling rate. AirPods on macOS deliver 50 Hz, but 25 Hz scored the same on real data
     /// and is 4× cheaper for DTW (D30).
     public var rate: Double = 25
-    /// High-pass cutoff in Hz; 0 disables the filter. Tuned on real data: 1.6 Hz (D30).
-    public var highPassHz: Double = 1.6
+    /// High-pass cutoff in Hz; 0 disables the filter. Tuned on two real sessions: 1.2 Hz (D33).
+    public var highPassHz: Double = 1.2
     /// Rotate each capture so its rest gravity points down (D7).
     public var canonicalize: Bool = true
     /// Rest pre-roll used to measure gravity for canonicalisation.
     public var restSeconds: Double = 0.3
-    public var channels: FeatureChannels = .all
+    /// Rotation + attitude: the accelerometer mostly added noise on real data (D33).
+    public var channels: FeatureChannels = [.rotation, .attitude]
     public var trim: Bool = true
     /// Trim threshold as a fraction of the floor-to-peak energy range (D22).
-    public var trimThreshold: Double = 0.25
+    public var trimThreshold: Double = 0.35
     /// Energy smoothing window before trimming, seconds.
     public var smoothSeconds: Double = 0.2
     /// Frames kept either side of the active region, seconds.
     public var trimPaddingSeconds: Double = 0.08
+    /// Per-take amplitude normalisation, removing how hard a take was mouthed (D33).
+    public var normalization: Normalization = .none
+    /// Append rate-of-change (first difference) of each vector channel.
+    public var derivatives: Bool = false
+    /// Append rotation-free magnitudes |a|, |ω|, |θ| of the selected groups.
+    public var magnitudes: Bool = true
     public init() {}
+
+    public enum Normalization: String, Codable, CaseIterable, Sendable {
+        case none, global, perChannel
+        public var label: String {
+            switch self { case .none: "off"; case .global: "per take"; case .perChannel: "per take & channel" }
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case rate, highPassHz, canonicalize, restSeconds, channels, trim, trimThreshold, smoothSeconds,
+             trimPaddingSeconds, normalization, derivatives, magnitudes
+    }
+    // Tolerant decoding: saved settings keep working when new options are added.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = FeatureConfig()
+        rate = try c.decodeIfPresent(Double.self, forKey: .rate) ?? d.rate
+        highPassHz = try c.decodeIfPresent(Double.self, forKey: .highPassHz) ?? d.highPassHz
+        canonicalize = try c.decodeIfPresent(Bool.self, forKey: .canonicalize) ?? d.canonicalize
+        restSeconds = try c.decodeIfPresent(Double.self, forKey: .restSeconds) ?? d.restSeconds
+        channels = try c.decodeIfPresent(FeatureChannels.self, forKey: .channels) ?? d.channels
+        trim = try c.decodeIfPresent(Bool.self, forKey: .trim) ?? d.trim
+        trimThreshold = try c.decodeIfPresent(Double.self, forKey: .trimThreshold) ?? d.trimThreshold
+        smoothSeconds = try c.decodeIfPresent(Double.self, forKey: .smoothSeconds) ?? d.smoothSeconds
+        trimPaddingSeconds = try c.decodeIfPresent(Double.self, forKey: .trimPaddingSeconds) ?? d.trimPaddingSeconds
+        normalization = try c.decodeIfPresent(Normalization.self, forKey: .normalization) ?? d.normalization
+        derivatives = try c.decodeIfPresent(Bool.self, forKey: .derivatives) ?? d.derivatives
+        magnitudes = try c.decodeIfPresent(Bool.self, forKey: .magnitudes) ?? d.magnitudes
+    }
 
     var smoothRadius: Int { max(0, Int((smoothSeconds * rate / 2).rounded())) }
     var trimPadding: Int { max(0, Int((trimPaddingSeconds * rate).rounded())) }
@@ -126,13 +167,52 @@ public enum Features {
         if config.trim, let range = activeRange(energies, config: config) {
             frames = Array(frames[range])
         }
+        let sequence = derive(frames, config: config)
         return SegmentFeatures(
-            sequence: FeatureSequence(frames: frames),
+            sequence: sequence,
             energies: energies,
             energyPeak: energies.max() ?? 0,
             maxGap: resampled.maxGap,
             headRotationDegrees: headDegrees,
             location: s[0].location)
+    }
+
+    /// Optional derived channels and per-take normalisation (D33).
+    static func derive(_ base: [[Double]], config: FeatureConfig) -> FeatureSequence {
+        guard let width = base.first?.count else { return FeatureSequence(frames: base) }
+        var frames = base
+        var vectorDims = width
+        if config.derivatives {
+            for i in frames.indices {
+                let prev = base[max(0, i - 1)], next = base[min(base.count - 1, i + 1)]
+                frames[i] += (0..<width).map { (next[$0] - prev[$0]) * config.rate / 20 }
+            }
+            vectorDims += width
+        }
+        if config.magnitudes {
+            for i in frames.indices {
+                let row = base[i]
+                for g in stride(from: 0, to: width - 2, by: 3) {
+                    let v = Vec3(row[g], row[g + 1], row[g + 2])
+                    frames[i].append(v.length)
+                }
+            }
+        }
+        var seq = FeatureSequence(frames: frames, vectorDims: vectorDims)
+        switch config.normalization {
+        case .none: break
+        case .global:
+            let rms = (seq.values.map { $0 * $0 }.reduce(0, +) / Double(max(seq.values.count, 1))).squareRoot()
+            if rms > 1e-12 { seq.values = seq.values.map { $0 / rms } }
+        case .perChannel:
+            for d in 0..<seq.dims {
+                let ch = seq.channel(d)
+                let mean = ch.reduce(0, +) / Double(ch.count)
+                let sd = (ch.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(ch.count)).squareRoot()
+                for i in 0..<seq.count { seq[frame: i, dim: d] = sd > 1e-12 ? (seq[frame: i, dim: d] - mean) / sd : 0 }
+            }
+        }
+        return seq
     }
 
     /// Frames above a segment-relative threshold, so training and decoding trim the same way.

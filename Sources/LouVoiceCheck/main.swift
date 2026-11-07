@@ -27,8 +27,16 @@ if args.contains("--sim-eval") {
 // --eval <dataset.json> [--tune]: honest evaluation of recorded takes, optionally auto-tuned.
 if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     let url = URL(fileURLWithPath: (args[i + 1] as NSString).expandingTildeInPath)
-    guard let data = try? Data(contentsOf: url), let dataset = try? JSONDecoder().decode(Dataset.self, from: data) else {
+    guard let data = try? Data(contentsOf: url), var dataset = try? JSONDecoder().decode(Dataset.self, from: data) else {
         print("Can't read dataset at \(url.path)"); exit(1)
+    }
+    // --merge <other.json> (repeatable): pool sessions; blocks stay distinct.
+    for (j, a) in args.enumerated() where a == "--merge" && j + 1 < args.count {
+        let u = URL(fileURLWithPath: (args[j + 1] as NSString).expandingTildeInPath)
+        if let d = try? Data(contentsOf: u), let other = try? JSONDecoder().decode(Dataset.self, from: d) {
+            dataset.takes += other.takes
+            print("merged \(other.takes.count) takes from \(u.lastPathComponent)")
+        }
     }
     let train = dataset.trainingTakes.map(Tuner.RawTake.init)
     let blocks = Set(train.map(\.block)).count
@@ -43,6 +51,9 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
                      r.optimisticAccuracy.map { String(format: "%.0f%%", $0 * 100) } ?? "-", r.chance * 100, r.pValue))
         for (label, acc) in r.perLabelAccuracy.sorted(by: { $0.key < $1.key }) { print(String(format: "  %-8@ %.0f%%", label, acc * 100)) }
         print("  most confused:", r.confusedPairs.prefix(5).map { "\($0.a)↔\($0.b)×\($0.count)" }.joined(separator: ", "))
+        if !dataset.testTakes.isEmpty, let q = Tuner.heldOut(training: train, test: dataset.testTakes.map(Tuner.RawTake.init), config: config) {
+            print("  quiz (held-out takes): \(q.correct)/\(q.total) = \(Int((Double(q.correct) / Double(max(q.total, 1)) * 100).rounded()))%")
+        }
     }
 
     if args.contains("--quality") {
@@ -62,6 +73,47 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     old.features.highPassHz = 0.8; old.classifier.augmentCopies = 4
     report("original defaults (HP 0.8 Hz, aug ×4)", old)
     report("current defaults", .defaults)
+
+    // --cross <other.json>: train on this dataset only, test on every take of the other session.
+    if let j = args.firstIndex(of: "--cross"), j + 1 < args.count {
+        let u = URL(fileURLWithPath: (args[j + 1] as NSString).expandingTildeInPath)
+        if let d = try? Data(contentsOf: u), let other = try? JSONDecoder().decode(Dataset.self, from: d) {
+            var configs: [(String, PipelineConfig)] = [("current defaults", .defaults)]
+            var tuned = PipelineConfig.defaults
+            tuned.features.highPassHz = 2.0; tuned.features.channels = [.rotation, .attitude]; tuned.features.trimThreshold = 0.35
+            configs.append(("session-2 tuned", tuned))
+            for (name, c) in configs {
+                if let q = Tuner.heldOut(training: train, test: other.takes.map(Tuner.RawTake.init), config: c) {
+                    let per = q.perLabel.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value.0)/\($0.value.1)" }.joined(separator: "  ")
+                    print(String(format: "cross-session %@: %d/%d = %.0f%%   %@", name, q.correct, q.total,
+                                 Double(q.correct) / Double(max(q.total, 1)) * 100, per))
+                }
+            }
+        }
+    }
+
+    // --candidates: compare a few robust settings (pooled LOBO + quiz), to choose defaults without
+    // trusting a single auto-tune winner.
+    if args.contains("--candidates") {
+        func make(_ rate: Double, _ hp: Double, _ ch: FeatureChannels, _ mag: Bool, _ trim: Double, _ k: Int) -> (String, PipelineConfig) {
+            var c = PipelineConfig.defaults
+            c.features.rate = rate; c.features.highPassHz = hp; c.features.channels = ch
+            c.features.magnitudes = mag; c.features.trimThreshold = trim; c.classifier.k = k
+            return (c.summary, c)
+        }
+        let ra: FeatureChannels = [.rotation, .attitude]
+        let list = [make(25, 1.6, .all, false, 0.25, 3), make(25, 1.2, ra, false, 0.35, 3), make(25, 1.2, ra, true, 0.35, 3),
+                    make(50, 1.2, ra, true, 0.35, 3), make(25, 1.6, ra, true, 0.35, 3), make(25, 1.2, ra, true, 0.35, 1),
+                    make(25, 2.0, ra, true, 0.35, 3)]
+        for (name, c) in list {
+            guard let r = Tuner.evaluate(train, config: c) else { continue }
+            let q = Tuner.heldOut(training: train, test: dataset.testTakes.map(Tuner.RawTake.init), config: c)
+            print(String(format: "LOBO %.0f%%  words %.0f%%  none %@  quiz %@   %@", r.accuracy * 100, r.wordAccuracy * 100,
+                         r.noneRecall.map { String(format: "%.0f%%", $0 * 100) } ?? "-",
+                         q.map { "\($0.correct)/\($0.total)" } ?? "-", name))
+        }
+        exit(0)
+    }
 
     if args.contains("--tune") {
         let start = Date()

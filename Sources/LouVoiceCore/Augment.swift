@@ -14,7 +14,7 @@ public struct AugmentConfig: Codable, Sendable, Hashable {
 public enum Augment {
     public static func augment(_ seq: FeatureSequence, config: AugmentConfig = AugmentConfig(),
                                rng: inout SeededRNG) -> FeatureSequence {
-        guard seq.count >= 2, seq.dims % 3 == 0 else { return seq }
+        guard seq.count >= 2 else { return seq }
         let angle = rng.uniform(-config.maxRotationDegrees, config.maxRotationDegrees) * .pi / 180
         let rotation = Mat3(rotationVector: rng.unitVector() * angle)
         let gain = rng.uniform(config.amplitude.lowerBound, config.amplitude.upperBound)
@@ -23,7 +23,8 @@ public enum Augment {
         // Rotate each xyz triplet, scale.
         var rotated = seq
         for i in 0..<seq.count {
-            for g in stride(from: 0, to: seq.dims, by: 3) {
+            for d in seq.vectorDims..<seq.dims { rotated[frame: i, dim: d] = seq[frame: i, dim: d] * gain }
+            for g in stride(from: 0, to: seq.vectorDims - seq.vectorDims % 3, by: 3) {
                 let v = rotation * Vec3(seq[frame: i, dim: g], seq[frame: i, dim: g + 1], seq[frame: i, dim: g + 2])
                 rotated[frame: i, dim: g] = v.x * gain
                 rotated[frame: i, dim: g + 1] = v.y * gain
@@ -41,7 +42,7 @@ public enum Augment {
                 values[k * seq.dims + d] = rotated[frame: i, dim: d] * (1 - f) + rotated[frame: i + 1, dim: d] * f
             }
         }
-        var out = FeatureSequence(values: values, dims: seq.dims)
+        var out = FeatureSequence(values: values, dims: seq.dims, vectorDims: seq.vectorDims)
 
         // Jitter relative to each channel's spread.
         if config.jitter > 0 {

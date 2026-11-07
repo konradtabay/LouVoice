@@ -71,9 +71,13 @@ public struct PipelineConfig: Codable, Hashable, Sendable {
     /// Short human-readable summary.
     public var summary: String {
         let f = features, c = classifier
-        return String(format: "%.0f Hz · HP %@ · %@ · trim %@ · k=%d · aug ×%d (±%.0f°) · band %.0f%%",
+        var extras = ""
+        if f.normalization != .none { extras += " · norm " + f.normalization.label }
+        if f.derivatives { extras += " · +Δ" }
+        if f.magnitudes { extras += " · +|v|" }
+        return String(format: "%.0f Hz · HP %@ · %@%@ · trim %@ · k=%d · aug ×%d (±%.0f°) · band %.0f%%",
                       f.rate, f.highPassHz > 0 ? String(format: "%.1f Hz", f.highPassHz) : "off",
-                      f.channels.label, f.trim ? String(format: "%.0f%%", f.trimThreshold * 100) : "off",
+                      f.channels.label, extras, f.trim ? String(format: "%.0f%%", f.trimThreshold * 100) : "off",
                       c.k, c.augmentCopies, c.augment.maxRotationDegrees, c.band * 100)
     }
 }
