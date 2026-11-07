@@ -70,6 +70,7 @@ public enum Tuner {
         return [
             knob("sample rate", [25.0, 50.0], label: { String(format: "%.0f Hz", $0) }) { $0.features.rate = $1 },
             knob("high-pass", [0.0, 0.3, 0.5, 0.8, 1.2, 1.6, 2.0, 3.0], label: { $0 == 0 ? "off" : String(format: "%.1f Hz", $0) }) { $0.features.highPassHz = $1 },
+            knob("low-pass", [0.0, 4.0, 6.0, 8.0], label: { $0 == 0 ? "off" : String(format: "%.0f Hz", $0) }) { $0.features.lowPassHz = $1 },
             knob("channels", channelSets, label: { $0.label }) { $0.features.channels = $1 },
             knob("trim", [-1.0, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65], label: { $0 < 0 ? "off" : String(format: "%.0f%%", $0 * 100) }) {
                 if $1 < 0 { $0.features.trim = false } else { $0.features.trim = true; $0.features.trimThreshold = $1 }
@@ -125,5 +126,68 @@ public enum Tuner {
             if !improved { break }
         }
         return trials.sorted(by: better)
+    }
+}
+
+// MARK: - Ensemble (D35)
+
+/// Several pipelines voting together: each ranks the classes, scores are divided by that
+/// pipeline's own mean class score (so different feature sets are comparable) and summed.
+public struct EnsembleClassifier: Sendable {
+    public let members: [(config: PipelineConfig, classifier: Classifier)]
+
+    public init?(training: [Tuner.RawTake], configs: [PipelineConfig]) {
+        var members: [(PipelineConfig, Classifier)] = []
+        for c in configs {
+            let feats = training.compactMap { t in
+                Features.extract(t.samples, config: c.features).map { LabeledFeatures(id: t.id, label: t.label, features: $0.sequence) }
+            }
+            if let clf = Classifier(training: feats, config: c.classifier) { members.append((c, clf)) }
+        }
+        guard !members.isEmpty else { return nil }
+        self.members = members
+    }
+
+    public func rank(_ samples: [MotionSample], active: Set<String>? = nil) -> [RankedLabel] {
+        var total: [String: Double] = [:]
+        var votes: [String: Int] = [:]
+        for (config, clf) in members {
+            guard let f = Features.extract(samples, config: config.features) else { continue }
+            let ranked = clf.rank(f.sequence, active: active)
+            let mean = ranked.map(\.score).reduce(0, +) / Double(max(ranked.count, 1))
+            guard mean > 0 else { continue }
+            for r in ranked { total[r.label, default: 0] += r.score / mean; votes[r.label, default: 0] += 1 }
+        }
+        return total.map { RankedLabel(label: $0.key, score: $0.value / Double(votes[$0.key]!)) }.sorted { $0.score < $1.score }
+    }
+
+    public func predict(_ samples: [MotionSample], active: Set<String>? = nil, minMargin: Double = 0) -> Prediction {
+        let ranked = rank(samples, active: active)
+        let margin = Classifier.margin(ranked)
+        var reason: String?
+        if let best = ranked.first {
+            if best.label == noneLabel { reason = "Looked like non-word movement" }
+            else if margin < minMargin { reason = "Too close between \(ranked[0].label) and \(ranked[1].label)" }
+        } else { reason = "No usable motion" }
+        return Prediction(ranked: ranked, margin: margin, accepted: reason == nil, rejectReason: reason)
+    }
+}
+
+extension Tuner {
+    /// Leave-one-block-out accuracy of an ensemble (no permutations; for comparison).
+    public static func ensembleLOBO(_ takes: [RawTake], configs: [PipelineConfig]) -> (accuracy: Double, words: Double)? {
+        let blocks = Set(takes.map(\.block))
+        guard blocks.count >= 2 else { return nil }
+        var correct = 0, total = 0, wordCorrect = 0, wordTotal = 0
+        for block in blocks {
+            let train = takes.filter { $0.block != block }, test = takes.filter { $0.block == block }
+            guard let e = EnsembleClassifier(training: train, configs: configs) else { continue }
+            for t in test {
+                let hit = e.rank(t.samples).first?.label == t.label
+                total += 1; if hit { correct += 1 }
+                if t.label != noneLabel { wordTotal += 1; if hit { wordCorrect += 1 } }
+            }
+        }
+        return total == 0 ? nil : (Double(correct) / Double(total), Double(wordCorrect) / Double(max(wordTotal, 1)))
     }
 }

@@ -46,8 +46,10 @@ public struct FeatureConfig: Codable, Hashable, Sendable {
     /// Resampling rate. AirPods on macOS deliver 50 Hz, but 25 Hz scored the same on real data
     /// and is 4× cheaper for DTW (D30).
     public var rate: Double = 25
-    /// High-pass cutoff in Hz; 0 disables the filter. Tuned on two real sessions: 1.2 Hz (D33).
-    public var highPassHz: Double = 1.2
+    /// High-pass cutoff in Hz; 0 disables the filter. 0.8 Hz on 280 real takes (D37).
+    public var highPassHz: Double = 0.8
+    /// Low-pass cutoff in Hz; 0 disables (D35).
+    public var lowPassHz: Double = 0
     /// Rotate each capture so its rest gravity points down (D7).
     public var canonicalize: Bool = true
     /// Rest pre-roll used to measure gravity for canonicalisation.
@@ -77,7 +79,7 @@ public struct FeatureConfig: Codable, Hashable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case rate, highPassHz, canonicalize, restSeconds, channels, trim, trimThreshold, smoothSeconds,
+        case rate, highPassHz, lowPassHz, canonicalize, restSeconds, channels, trim, trimThreshold, smoothSeconds,
              trimPaddingSeconds, normalization, derivatives, magnitudes
     }
     // Tolerant decoding: saved settings keep working when new options are added.
@@ -86,6 +88,7 @@ public struct FeatureConfig: Codable, Hashable, Sendable {
         let d = FeatureConfig()
         rate = try c.decodeIfPresent(Double.self, forKey: .rate) ?? d.rate
         highPassHz = try c.decodeIfPresent(Double.self, forKey: .highPassHz) ?? d.highPassHz
+        lowPassHz = try c.decodeIfPresent(Double.self, forKey: .lowPassHz) ?? d.lowPassHz
         canonicalize = try c.decodeIfPresent(Bool.self, forKey: .canonicalize) ?? d.canonicalize
         restSeconds = try c.decodeIfPresent(Double.self, forKey: .restSeconds) ?? d.restSeconds
         channels = try c.decodeIfPresent(FeatureChannels.self, forKey: .channels) ?? d.channels
@@ -152,6 +155,7 @@ public enum Features {
 
         // D8: remove drift and slow head movement.
         channels = channels.map { Signal.highPass($0, cutoff: config.highPassHz, rate: config.rate) }
+        if config.lowPassHz > 0 { channels = channels.map { Signal.lowPass($0, cutoff: config.lowPassHz, rate: config.rate) } }
 
         // Energy uses all channels so trimming doesn't depend on the channel selection.
         let full = FeatureSequence(frames: (0..<s.count).map { i in channels.map { $0[i] } })

@@ -34,6 +34,10 @@ public struct Prediction: Sendable {
     public var accepted: Bool
     public var rejectReason: String?
     public var best: RankedLabel? { ranked.first }
+
+    public init(ranked: [RankedLabel], margin: Double, accepted: Bool, rejectReason: String?) {
+        self.ranked = ranked; self.margin = margin; self.accepted = accepted; self.rejectReason = rejectReason
+    }
 }
 
 /// Mean-of-k-nearest DTW classifier over real + augmented references (D10).
@@ -105,7 +109,7 @@ public struct Classifier: Sendable {
         return Prediction(ranked: ranked, margin: margin, accepted: reason == nil, rejectReason: reason)
     }
 
-    static func margin(_ ranked: [RankedLabel]) -> Double {
+    public static func margin(_ ranked: [RankedLabel]) -> Double {
         guard ranked.count >= 2, ranked[1].score > 0 else { return ranked.isEmpty ? 0 : 1 }
         return max(0, 1 - ranked[0].score / ranked[1].score)
     }

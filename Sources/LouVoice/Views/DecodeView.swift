@@ -49,6 +49,23 @@ struct DecodeView: View {
     @ViewBuilder private var controls: some View {
         @Bindable var d = model.decoder
         VStack(alignment: .leading, spacing: 16) {
+            SectionCard(title: "Next-word prediction") {
+                Picker("Strength", selection: Binding(get: { model.config.context.strength },
+                                                      set: { v in model.updateConfig { $0.context.strength = v } })) {
+                    ForEach(ContextModel.Strength.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                Text(model.config.context.strength.detail).font(.caption).foregroundStyle(.secondary)
+                Text("Expected phrases, one per line").font(.subheadline)
+                TextEditor(text: Binding(get: { model.config.context.phrases.joined(separator: "\n") },
+                                         set: { v in model.updateConfig { $0.context.phrases = v.components(separatedBy: .newlines) } }))
+                    .font(.callout).frame(height: 60)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
+                HStack {
+                    Text(d.currentContext.map { "After \"\($0)\"" } ?? "Start of phrase").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Restart phrase") { d.resetContext() }.font(.caption)
+                }
+            }
             SectionCard(title: "Context screen (active words)") {
                 FlowChips(words: model.words, active: d.activeWords) { word in
                     if d.activeWords.contains(word) { d.activeWords.remove(word) } else { d.activeWords.insert(word) }
@@ -132,6 +149,11 @@ private struct ResultCard: View {
                         .font(.title3).foregroundStyle(.secondary)
                 }
             }
+            let next = d.expectedNext().prefix(3)
+            if !next.isEmpty, d.phase == .idle || d.isConfirming {
+                Text("Expected next: " + next.map { "\($0.word) \(Int(($0.p * 100).rounded()))%" }.joined(separator: " · "))
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             if model.classifier != nil, d.phase == .idle {
                 Button("Decode a word") { d.trigger() }.buttonStyle(.borderedProminent).controlSize(.large)
             }
@@ -156,6 +178,10 @@ private struct ResultCard: View {
                     Text(String(format: "%.2f", item.score)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
             }
+        }
+        if let motion = r.motionBest, let final = r.prediction.best?.label, motion != final, r.outcome != .discarded {
+            Text("Motion alone said \"\(displayLabel(motion))\"; the phrase context picked \"\(final)\"")
+                .font(.callout).foregroundStyle(.orange)
         }
         if d.isConfirming {
             Label("Nod to accept · shake to reject  (Y / N)", systemImage: "person.fill.questionmark")

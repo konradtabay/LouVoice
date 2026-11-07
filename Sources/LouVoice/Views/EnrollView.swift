@@ -74,9 +74,39 @@ struct EnrollView: View {
                 Stepper("Reps per word per block: \(e.reps)", value: $e.reps, in: 1...6)
                 Stepper("Non-word prompts per block: \(e.noisePerBlock)", value: $e.noisePerBlock, in: 0...6)
                 Toggle("Quiz after each block", isOn: $e.quizAfterBlock)
-                Toggle("Speak prompts in AirPods", isOn: Binding(get: { model.cues.speakPrompts },
-                                                                set: { model.cues.speakPrompts = $0 }))
-                let prompts = e.blockCount * (model.words.count * (e.reps + (e.quizAfterBlock ? 1 : 0)) + e.noisePerBlock)
+                Toggle("Adaptive reps (auto)", isOn: $e.adaptive)
+                Text(e.isRunning && e.mode == .train ? "This block: \(e.plan.summary)"
+                     : "Before each block, re-scores your data: weak words get +1 to +3 reps, and the most-confused pairs are drilled back to back.")
+                    .font(.caption).foregroundStyle(e.isRunning ? Color.orange : Color.secondary)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Manual focus words (+\(e.focusExtraReps) reps each, on top of adaptive)").font(.subheadline)
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 6)], alignment: .leading, spacing: 6) {
+                        ForEach(model.words, id: \.self) { word in
+                            let on = e.focusWords.contains(word)
+                            Button { if on { e.focusWords.remove(word) } else { e.focusWords.insert(word) } } label: {
+                                Text(word).font(.callout).padding(.horizontal, 8).padding(.vertical, 4).frame(maxWidth: .infinity)
+                                    .background(Capsule().fill(on ? Color.orange.opacity(0.3) : Color.secondary.opacity(0.08)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    Button("Pick weakest from last evaluation") {
+                        if let r = model.evaluation {
+                            let weak = model.words.filter { (r.perLabelAccuracy[$0] ?? 1) < 0.7 }
+                            e.focusWords = Set(weak.isEmpty ? Array(model.words.sorted { (r.perLabelAccuracy[$0] ?? 1) < (r.perLabelAccuracy[$1] ?? 1) }.prefix(2)) : weak)
+                        }
+                    }
+                    .disabled(model.evaluation == nil)
+                    .font(.caption)
+                }
+                HStack {
+                    Toggle("Speak prompts in AirPods", isOn: Binding(get: { model.cues.speakPrompts },
+                                                                    set: { model.cues.speakPrompts = $0 }))
+                    Spacer()
+                    Button("Test sound") { model.cues.test() }
+                }
+                let prompts = e.blockCount * (model.words.count * (e.reps + (e.quizAfterBlock ? 1 : 0)) + e.noisePerBlock
+                                              + e.focusWords.intersection(model.words).count * e.focusExtraReps)
                 Text("≈ \(max(1, Int(Double(prompts) * 4.4 / 60))) min. Every take is tested before it's learned.")
                     .font(.caption).foregroundStyle(.secondary)
                 if e.isRunning {
@@ -196,10 +226,12 @@ private struct PromptCard: View {
             case .ready(let p, let quiz):
                 quizTag(quiz)
                 Text(p.text).font(.system(size: p.label == noneLabel ? 36 : 72, weight: .bold, design: .rounded))
+                hint(p)
                 Text("Get ready… mouth it after the beep").foregroundStyle(.secondary)
             case .recording(let p, let quiz):
                 quizTag(quiz)
                 Text(p.text).font(.system(size: p.label == noneLabel ? 36 : 72, weight: .bold, design: .rounded))
+                hint(p)
                 Label("Now", systemImage: "record.circle.fill").font(.title2).foregroundStyle(.red)
             case .feedback(let ok, let message, let heard, let correct):
                 Image(systemName: !ok ? "exclamationmark.triangle.fill" : correct == false ? "xmark.circle.fill" : "checkmark.circle.fill")
@@ -235,6 +267,17 @@ private struct PromptCard: View {
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.secondary.opacity(0.06)))
+    }
+
+    @ViewBuilder private func hint(_ p: Enrollment.Prompt) -> some View {
+        if let other = p.contrastWith {
+            Text("CONTRAST DRILL: make it clearly different from \"\(other)\"").font(.caption.weight(.bold))
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Color.orange.opacity(0.25)))
+        }
+        if let h = Enrollment.hints[p.label] {
+            Text(h).font(.title3).foregroundStyle(.blue).multilineTextAlignment(.center)
+        }
     }
 
     @ViewBuilder private func quizTag(_ quiz: Bool) -> some View {

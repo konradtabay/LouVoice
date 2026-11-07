@@ -56,15 +56,18 @@ public struct PipelineConfig: Codable, Hashable, Sendable {
     public var features = FeatureConfig()
     public var classifier = ClassifierConfig()
     public var quality = QualityConfig()
+    /// Next-word prediction used when decoding (D37).
+    public var context = ContextModel()
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case features, classifier, quality }
+    enum CodingKeys: String, CodingKey { case features, classifier, quality, context }
     // Tolerant decoding so saved settings survive new fields.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         features = (try? c.decode(FeatureConfig.self, forKey: .features)) ?? FeatureConfig()
         classifier = (try? c.decode(ClassifierConfig.self, forKey: .classifier)) ?? ClassifierConfig()
         quality = (try? c.decode(QualityConfig.self, forKey: .quality)) ?? QualityConfig()
+        context = (try? c.decode(ContextModel.self, forKey: .context)) ?? ContextModel()
     }
     public static let defaults = PipelineConfig()
 
@@ -72,6 +75,7 @@ public struct PipelineConfig: Codable, Hashable, Sendable {
     public var summary: String {
         let f = features, c = classifier
         var extras = ""
+        if f.lowPassHz > 0 { extras += String(format: " · LP %.0f Hz", f.lowPassHz) }
         if f.normalization != .none { extras += " · norm " + f.normalization.label }
         if f.derivatives { extras += " · +Δ" }
         if f.magnitudes { extras += " · +|v|" }

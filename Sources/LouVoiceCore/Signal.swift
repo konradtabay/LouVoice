@@ -44,6 +44,19 @@ public enum Signal {
     /// 2nd-order Butterworth high-pass coefficients (RBJ cookbook, Q = 1/√2).
     struct Biquad {
         var b0, b1, b2, a1, a2: Double
+        init(lowPass cutoff: Double, rate: Double) {
+            let w0 = 2 * Double.pi * cutoff / rate
+            let alpha = sin(w0) / (2 * (0.5).squareRoot())
+            let c = cos(w0)
+            let a0 = 1 + alpha
+            b0 = (1 - c) / 2 / a0
+            b1 = (1 - c) / a0
+            b2 = (1 - c) / 2 / a0
+            a1 = -2 * c / a0
+            a2 = (1 - alpha) / a0
+            lowPass = true
+        }
+        var lowPass = false
         init(highPass cutoff: Double, rate: Double) {
             let w0 = 2 * Double.pi * cutoff / rate
             let alpha = sin(w0) / (2 * (0.5).squareRoot())
@@ -58,8 +71,8 @@ public enum Signal {
         func run(_ x: [Double]) -> [Double] {
             guard let x0 = x.first else { return [] }
             var y = [Double](repeating: 0, count: x.count)
-            // Start in steady state for a constant input (high-pass output of DC is 0).
-            var x1 = x0, x2 = x0, y1 = 0.0, y2 = 0.0
+            // Start in steady state for a constant input (high-pass of DC is 0, low-pass of DC is DC).
+            var x1 = x0, x2 = x0, y1 = lowPass ? x0 : 0.0, y2 = lowPass ? x0 : 0.0
             for i in x.indices {
                 let v = b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
                 x2 = x1; x1 = x[i]; y2 = y1; y1 = v
@@ -67,6 +80,21 @@ public enum Signal {
             }
             return y
         }
+    }
+
+    /// Zero-phase low-pass (forward + backward) with odd reflection padding.
+    public static func lowPass(_ x: [Double], cutoff: Double, rate: Double) -> [Double] {
+        let n = x.count
+        guard n >= 4, cutoff > 0, cutoff < rate / 2 else { return x }
+        let pad = min(n - 1, Int(rate * 0.5))
+        var padded: [Double] = []
+        for i in stride(from: pad, through: 1, by: -1) { padded.append(2 * x[0] - x[i]) }
+        padded.append(contentsOf: x)
+        for i in 1...pad { padded.append(2 * x[n - 1] - x[n - 1 - i]) }
+        let filter = Biquad(lowPass: cutoff, rate: rate)
+        let forward = filter.run(padded)
+        let backward = filter.run(forward.reversed())
+        return Array(backward.reversed()[pad..<(pad + n)])
     }
 
     /// Zero-phase high-pass (forward + backward) with odd reflection padding (D8).

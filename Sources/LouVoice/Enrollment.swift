@@ -17,6 +17,22 @@ final class Enrollment {
         var text: String
         var action: SimAction
         var attempts = 0
+        /// Set for contrast drills: the other word of the confused pair, prompted right next to this one.
+        var contrastWith: String? = nil
+    }
+
+    /// Adaptive block plan (D36): extra reps for weak words, contrast drills for confused pairs.
+    struct BlockPlan: Equatable {
+        var extra: [String: Int] = [:]
+        var pairs: [[String]] = []
+        var basis = ""
+        var isEmpty: Bool { extra.values.allSatisfy { $0 == 0 } && pairs.isEmpty }
+        var summary: String {
+            if isEmpty { return basis.isEmpty ? "No adjustments yet" : "All words strong: no extra reps (\(basis))" }
+            var parts = extra.filter { $0.value > 0 }.sorted { $0.value > $1.value }.map { "\($0.key) +\($0.value)" }
+            parts += pairs.map { "\($0[0]) ↔ \($0[1]) drill ×\(Enrollment.contrastReps)" }
+            return parts.joined(separator: " · ") + " (\(basis))"
+        }
     }
 
     struct LiveResult: Identifiable {
@@ -42,6 +58,22 @@ final class Enrollment {
     var blockCount = 3
     var noisePerBlock = 4
     var quizAfterBlock = true
+    /// Words that get extra reps in training blocks (the confused ones).
+    var focusWords: Set<String> = []
+    var focusExtraReps = 2
+    /// Plan each training block from current accuracy (D36).
+    var adaptive = true
+    nonisolated static let contrastReps = 2
+    private(set) var plan = BlockPlan()
+
+    /// Articulation hints: give each word its own distinct, repeatable movement (D35).
+    static let hints: [String: String] = [
+        "hello": "Two beats: drop the jaw on \"hel\", open wide on \"LO\"",
+        "can": "One big jaw drop: \"KAAAN\"",
+        "you": "Push the lips forward into a tight \"OO\", jaw nearly still",
+        "hear": "Small open, then pull the corners back: \"HEE-er\"",
+        "me": "Press the lips together hard, then a wide smile: \"m-EE\"",
+    ]
 
     private(set) var mode: Mode = .train
     private(set) var phase: Phase = .idle
@@ -90,12 +122,14 @@ final class Enrollment {
         let session = Self.stamp()
         self.mode = mode
         let quizzes = mode == .train && quizAfterBlock
+        let focus = mode == .train ? focusWords.intersection(words) : []
+        let extra = focusExtraReps
         totalBlocks = blocks
-        total = blocks * (words.count * reps + noisePerBlock) + (quizzes ? blocks * words.count : 0)
+        total = blocks * (words.count * reps + focus.count * extra + noisePerBlock) + (quizzes ? blocks * words.count : 0)
         completed = 0; rejected = 0; block = 0; log = []; results = []
         task = Task { [weak self] in
             await self?.run(words: words, reps: reps, blocks: blocks, noise: noisePerBlock,
-                            session: session, prefix: prefix, quizzes: quizzes)
+                            session: session, prefix: prefix, quizzes: quizzes, focus: focus, extra: extra)
             self?.task = nil
         }
     }
@@ -119,7 +153,8 @@ final class Enrollment {
 
     // MARK: Flow
 
-    private func run(words: [String], reps: Int, blocks: Int, noise: Int, session: String, prefix: String, quizzes: Bool) async {
+    private func run(words: [String], reps: Int, blocks: Int, noise: Int, session: String, prefix: String, quizzes: Bool,
+                     focus: Set<String>, extra: Int) async {
         let hub = model.hub, cues = model.cues
 
         // No separate "stay still" calibration: the strength check is self-normalising (D32).
@@ -136,7 +171,7 @@ final class Enrollment {
 
             if mode == .quiz {
                 let classifier = await buildClassifier(excluding: nil)
-                await runPrompts(Self.prompts(words: words, reps: reps, noise: 0).shuffled(), block: b,
+                await runPrompts(Self.prompts(words: words, reps: reps, noise: 0), block: b,
                                  blockID: "quiz-\(session)", session: session, quiz: true, classifier: classifier)
                 continue
             }
@@ -144,7 +179,11 @@ final class Enrollment {
             // Test-then-train: predict each new take with a model that has never seen this block.
             let blockID = "\(prefix)-\(session)-b\(b)"
             let honest = await buildClassifier(excluding: blockID)
-            await runPrompts(Self.prompts(words: words, reps: reps, noise: noise).shuffled(), block: b,
+            plan = adaptive ? await makePlan(words: words) : BlockPlan()
+            let prompts = Self.prompts(words: words, reps: reps, noise: noise, focus: focus, extra: extra, plan: plan)
+            total += prompts.count - (words.count * reps + focus.count * extra + noise)
+            if !plan.isEmpty { log.insert("Block \(b) plan: \(plan.summary)", at: 0) }
+            await runPrompts(prompts, block: b,
                              blockID: blockID, session: session, quiz: false, classifier: honest)
             if Task.isCancelled { return }
 
@@ -153,7 +192,7 @@ final class Enrollment {
                 cues.say("Quick quiz. These takes are only for testing")
                 try? await Task.sleep(for: .seconds(1.6))
                 let classifier = await buildClassifier(excluding: nil)
-                await runPrompts(Self.prompts(words: words, reps: 1, noise: 0).shuffled(), block: b,
+                await runPrompts(Self.prompts(words: words, reps: 1, noise: 0), block: b,
                                  blockID: "quiz-\(session)-b\(b)", session: session, quiz: true, classifier: classifier)
             }
         }
@@ -225,12 +264,67 @@ final class Enrollment {
         }
     }
 
-    static func prompts(words: [String], reps: Int, noise: Int) -> [Prompt] {
-        var out: [Prompt] = []
-        for w in words { for _ in 0..<reps { out.append(Prompt(label: w, text: w, action: .word(w))) } }
-        for kind in NoiseKind.allCases.shuffled().prefix(noise) {
-            out.append(Prompt(label: noneLabel, text: kind.prompt, action: .noise(kind)))
+    /// Score the data so far and decide where this block's extra reps go.
+    /// Uses held-out-block accuracy when there are 2+ blocks, else this session's live results.
+    private func makePlan(words: [String]) async -> BlockPlan {
+        let takes = model.dataset.trainingTakes.compactMap { take in
+            model.features(for: take).map { EvalTake(id: take.id.uuidString, label: take.label, block: take.block, features: $0.sequence) }
         }
+        let config = model.config.classifier
+        var perLabel: [String: Double] = [:]
+        var pairs: [ConfusedPair] = []
+        var basis = ""
+        if Set(takes.map(\.block)).count >= 2,
+           let r = await Task.detached(priority: .userInitiated, operation: { Evaluation.run(takes, config: config, permutations: 0) }).value {
+            perLabel = r.perLabelAccuracy
+            pairs = r.confusedPairs
+            basis = "from \(takes.count) takes"
+        } else if !results.isEmpty {
+            for w in words {
+                let s = score(quiz: nil, label: w)
+                if let rate = s.rate { perLabel[w] = rate }
+            }
+            var counts: [String: Int] = [:]
+            for r in results where !r.correct && r.label != noneLabel && r.predicted != noneLabel {
+                counts[[r.label, r.predicted].sorted().joined(separator: "|"), default: 0] += 1
+            }
+            pairs = counts.map { k, v in let ab = k.split(separator: "|").map(String.init); return ConfusedPair(a: ab[0], b: ab[1], count: v) }
+                .sorted { $0.count > $1.count }
+            basis = "from this session's live results"
+        } else {
+            return BlockPlan()
+        }
+        var plan = BlockPlan(basis: basis)
+        for w in words {
+            let acc = perLabel[w] ?? 1
+            plan.extra[w] = acc < 0.5 ? 3 : acc < 0.7 ? 2 : acc < 0.85 ? 1 : 0
+        }
+        plan.pairs = pairs.filter { words.contains($0.a) && words.contains($0.b) && $0.count >= 2 }
+            .prefix(2).map { [$0.a, $0.b] }
+        return plan
+    }
+
+    static func prompts(words: [String], reps: Int, noise: Int, focus: Set<String> = [], extra: Int = 0,
+                        plan: BlockPlan = BlockPlan()) -> [Prompt] {
+        // Units are shuffled as a whole so contrast pairs stay back to back.
+        var units: [[Prompt]] = []
+        for w in words {
+            let n = reps + (focus.contains(w) ? extra : 0) + (plan.extra[w] ?? 0)
+            for _ in 0..<n { units.append([Prompt(label: w, text: w, action: .word(w))]) }
+        }
+        for pair in plan.pairs {
+            for _ in 0..<contrastReps {
+                let ordered = Bool.random() ? pair : pair.reversed()
+                units.append(ordered.enumerated().map { i, w in
+                    Prompt(label: w, text: w, action: .word(w), contrastWith: ordered[1 - i])
+                })
+            }
+        }
+        var out: [Prompt] = []
+        for kind in NoiseKind.allCases.shuffled().prefix(noise) {
+            units.append([Prompt(label: noneLabel, text: kind.prompt, action: .noise(kind))])
+        }
+        for unit in units.shuffled() { out += unit }
         return out
     }
 

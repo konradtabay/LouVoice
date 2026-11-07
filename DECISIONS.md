@@ -238,3 +238,69 @@ Not taken: k=1 and 50 Hz (same within noise), and the single auto-tune winner (6
 Only magnitudes helped. `FeatureSequence.vectorDims` keeps augmentation from rotating scalar channels.
 
 **Tools:** `LouVoiceCheck --eval A.json --merge B.json` pools sessions. `--cross B.json` trains on A and tests on B. `--candidates` compares a fixed shortlist of settings, to avoid trusting one winner.
+
+### D34: Generated tones on a kept-alive audio engine (2026-11-07). *Refines D13 cues.*
+**Decision:** Cues are short generated tones (start 880 Hz, end 587 Hz, accept rising two-tone, reject 196 Hz) played through an `AVAudioEngine` that stays running, replacing `NSSound` system sounds. The engine is rebuilt, and the speech synthesizer re-created, on `AVAudioEngineConfigurationChange` (output route change). `NSSound` remains as a fallback if the engine can't start. A **Test sound** button sits on Sensors and Enroll.
+**Why:** The user stopped hearing the cues. The Mac's default output was the AirPods and the app's code hadn't changed, so the likely causes were Bluetooth-specific:
+- an idle AirPods audio link takes a moment to wake and can swallow a 0.1 s system sound;
+- after a Bluetooth route change, a long-lived player or synthesizer can keep pointing at the old route.
+
+A continuously running output stream keeps the link awake, and rebuilding on route change covers the second cause.
+**Not verified:** Nothing here can be heard from this side; the Test sound button is how to confirm it.
+
+### D35: Settings have plateaued; improve the data instead (2026-11-07)
+**Data:** Sessions 2 and 3 together: 115 training takes in 7 blocks, plus 30 quiz takes. All takes are strong (minimum strength 3.4×).
+
+**Results** (leave-one-block-out):
+- **Current defaults are still best:** 63% overall, **56% words**, quiz **20/30 (67%)**. Every word scores 53–61%.
+- **The main confusion is me↔you** (×10). Both are short, closed-jaw words that look alike at 25 Hz.
+- **Pooling sessions helps:** session 3 alone scores 47% on words, 56% together with session 2.
+- **Across sessions:** train on one, test on the other, 46–47%.
+
+**What didn't help:**
+- **Low-pass filtering** (4, 6 or 8 Hz) made every setting worse (words 47–52%), so the fast part of the motion carries information. Added as an option, off by default.
+- **An ensemble** of 2–5 pipelines with different high-pass cutoffs (`EnsembleClassifier`, `LouVoiceCheck --ensemble`) scored 65–66% held-out and 59–60% words, but the quiz was unchanged at 19–20/30. That's within noise, so it isn't wired into the app; the code is kept for when there's more data.
+
+**Decision:** Improve how the data is collected, not the settings:
+- **Articulation hints** per default word, shown on every prompt, so each word gets its own distinct and repeatable movement. Examples: "me" = press the lips together, then a wide smile; "you" = lips pushed forward into a tight "oo".
+- **Focus words:** chosen words get +2 reps in each training block. "Pick weakest from last evaluation" selects words under 70% (or the two weakest).
+
+### D36: Adaptive reps and contrast drills, planned per block (2026-11-07). *Extends D35.*
+**Decision:** With "Adaptive reps (auto)" on (the default), each training block is planned from current accuracy:
+- With 2+ blocks of data, plans use the leave-one-block-out per-word accuracy and confusions, without permutations (about 1 s). Otherwise they use this session's test-then-train results.
+- Words get **+3 reps** below 50% accuracy, **+2** below 70%, **+1** below 85%.
+- The **two most-confused word pairs** (each confused at least twice) get **contrast drills**: both words prompted **back to back**, ×2 per block, in random order, marked "make it clearly different from …".
+- Prompts are shuffled as units so drills stay adjacent. The plan is shown on the Enroll screen and in the log. Manual focus words still add on top.
+
+**Why:** Reps should go where the errors are. Producing two confusable words one after the other pushes you to make them distinct and consistent, and it gives the model paired examples of the boundary between them.
+**On the current data** (sessions 2 and 3): every word is between 53% and 61%, so each gets +2, with drills for me↔you (confused ×10) and can↔me (×4). That makes about 37 prompts per block, roughly 2.7 minutes.
+
+### D37: Next-word prediction from expected phrases; high-pass back to 0.8 Hz (2026-11-07)
+**Data:** Session 4 (5 blocks with adaptive reps and drills, D36) brings the total to 356 takes: 280 training and 55 quiz in 12 blocks. Words rose to 63% and the quiz to 71% at the D33 settings.
+
+**Motion defaults:** With 3× the data, **high-pass 0.8 Hz** is best. Words score **70%** and the quiz **42/55 (76%)**, against 63% and 71% at 1.2 Hz; 0.5 Hz and 1.0 Hz both score lower. The earlier moves to 1.2–1.6 Hz (D30, D33) came from too little data. Everything else stays as in D33 (rotation + attitude, magnitudes, 35% trim, k=3, ×8).
+
+**Context model (the user's idea):** `ContextModel` is a smoothed bigram, P(word | previous), learned from a list of expected phrases (default "hello can you hear me"):
+- After a phrase's last word, the next word is predicted like a phrase start.
+- Motion scores become likelihoods, exp(−(score − best) / temperature), multiplied by the prior raised to a weight.
+- Results are re-ranked as −log(posterior), so the existing margin rule still works.
+- `_none` gets a neutral prior.
+- The "too far" check uses the motion score before context.
+- Context is the last kept word, and resets after 12 s idle or with "Restart phrase".
+
+**Evaluation** (`LouVoiceCheck --context`): the phrase is simulated by drawing one held-out take per word from the same block. Each step's context is the previous **decoded** word (chained, so errors propagate). The same is repeated with **random word order**, to check that context doesn't override the motion.
+
+| Preset (weight, temperature) | In order: words | In order: phrase | Random order: words |
+|---|---|---|---|
+| Off | 66% | 11% | 68% |
+| **Balanced (0.3, 0.05)**, default | **75%** | 28% | 65% |
+| Strong (0.5, 0.1) | 94% | 83% | 41% |
+| Phrase lock (1.0, 0.1) | 100% | 99% | 24% |
+
+**Why Balanced is the default:** a high weight looks perfect in order, but at Phrase lock it just recites the phrase, and out-of-order accuracy drops to about chance. Balanced gains 9 points in order for a 3-point cost out of order. Strong is a reasonable demo setting when the phrase is known; Phrase lock must not be presented as recognition.
+**UI:** The Decode screen has a strength picker with these explanations, an editor for expected phrases, an "Expected next" line, and a note whenever context changed the motion's answer.
+
+### D38: Context strength defaults to Strong (2026-11-07). *Amends D37.*
+**Decision:** The default next-word prediction strength is **Strong** (weight 0.5, temperature 0.1). Balanced is still available.
+**Why:** The user's choice for the demo, where the phrase is known: 94% of words and 83% of whole phrases right when said in order (D37).
+**Accepted cost:** Words mouthed out of order drop to about 41% (Balanced: 65%). Switch to Balanced or Off for free-order use.

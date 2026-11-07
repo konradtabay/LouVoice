@@ -14,6 +14,7 @@ public struct EvalTake: Sendable {
 public struct ConfusedPair: Sendable, Hashable, Identifiable {
     public var a: String, b: String, count: Int
     public var id: String { a + "|" + b }
+    public init(a: String, b: String, count: Int) { self.a = a; self.b = b; self.count = count }
 }
 
 public struct EvaluationReport: Sendable {

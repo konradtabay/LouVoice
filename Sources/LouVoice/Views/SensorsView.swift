@@ -12,9 +12,14 @@ struct SensorsView: View {
                     MetricTile(title: "Status", value: hub.status == .streaming ? "Streaming" : "Not streaming",
                                detail: hub.status == .streaming ? nil : hub.status.label)
                     MetricTile(title: "Sample rate", value: String(format: "%.1f Hz", hub.sampleRate),
-                               detail: "AirPods deliver roughly 25 Hz")
+                               detail: "AirPods Pro deliver about 50 Hz on macOS")
                     MetricTile(title: "Largest recent gap", value: String(format: "%.0f ms", hub.maxRecentGap * 1000),
                                detail: "Takes with gaps over 150 ms are rejected")
+                }
+                HStack {
+                    Button("Test sound") { model.cues.test() }
+                    Text("Plays a beep, a chime and \"sound check\" through the current output (your AirPods).")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if let s = hub.latest {
                     SectionCard(title: "Rotation rate (rad/s)") {

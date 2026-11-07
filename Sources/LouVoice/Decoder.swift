@@ -16,6 +16,10 @@ final class Decoder {
         var features: SegmentFeatures
         var simulatedWord: String?
         var date = Date()
+        /// Best word by motion alone, before context (shown when context changed the answer).
+        var motionBest: String?
+        /// The previous word context used, nil = start of phrase.
+        var contextWord: String?
     }
 
     enum Phase: Equatable { case idle, recording, thinking, confirming(until: Date) }
@@ -34,6 +38,27 @@ final class Decoder {
     var simulatedWord: String?
 
     static let confirmSeconds = 3.0
+    /// After this long without a word, context resets to the start of a phrase.
+    static let contextIdleSeconds = 12.0
+
+    /// Previous decoded word for next-word prediction (D37). nil = start of phrase.
+    private(set) var contextWord: String?
+    @ObservationIgnored private var contextTime = Date.distantPast
+
+    /// Context to use for the next decode (resets after a pause).
+    var currentContext: String? {
+        Date().timeIntervalSince(contextTime) > Self.contextIdleSeconds ? nil : contextWord
+    }
+
+    func resetContext() { contextWord = nil; contextTime = .distantPast }
+
+    /// What the context model expects next, best first.
+    func expectedNext() -> [(word: String, p: Double)] {
+        let ctx = model.config.context
+        guard ctx.weight > 0 else { return [] }
+        let vocab = activeWords.isEmpty ? model.words : model.words.filter { activeWords.contains($0) }
+        return ctx.expected(after: currentContext, vocabulary: vocab)
+    }
 
     @ObservationIgnored private unowned let model: AppModel
     @ObservationIgnored private var detector = HeadGestureDetector()
@@ -46,7 +71,7 @@ final class Decoder {
             .compactMap { $0.prediction.best?.label }.joined(separator: " ")
     }
 
-    func clear() { results.removeAll() }
+    func clear() { results.removeAll(); resetContext() }
 
     func trigger() {
         guard phase == .idle || isConfirming, let classifier = model.classifier else { return }
@@ -71,12 +96,22 @@ final class Decoder {
             }
             let active = self.activeWords.isEmpty ? nil : self.activeWords
             let (maxScore, minMargin) = (self.maxScore, self.minMargin)
-            let prediction = await Task.detached(priority: .userInitiated) {
-                classifier.predict(features.sequence, active: active, maxScore: maxScore, minMargin: minMargin)
+            let context = self.model.config.context, previous = self.currentContext
+            let (prediction, motionBest) = await Task.detached(priority: .userInitiated) { () -> (Prediction, String?) in
+                let motion = classifier.rank(features.sequence, active: active)
+                let ranked = context.rescore(motion, previous: previous)
+                let margin = Classifier.margin(ranked)
+                var reason: String?
+                if let best = ranked.first {
+                    if best.label == noneLabel { reason = "Looked like non-word movement" }
+                    else if (motion.first?.score ?? .infinity) > maxScore { reason = "Too far from every trained word" }
+                    else if margin < minMargin { reason = "Too close between \(ranked[0].label) and \(ranked[1].label)" }
+                } else { reason = "No usable motion" }
+                return (Prediction(ranked: ranked, margin: margin, accepted: reason == nil, rejectReason: reason), motion.first?.label)
             }.value
 
             var result = Result(prediction: prediction, outcome: .pending, samples: samples,
-                                features: features, simulatedWord: simWord)
+                                features: features, simulatedWord: simWord, motionBest: motionBest, contextWord: previous)
             if prediction.accepted, let word = prediction.best?.label {
                 if self.speakResult { cues.say(word) }
                 self.results.insert(result, at: 0)
@@ -130,6 +165,10 @@ final class Decoder {
         phase = .idle
         guard let i = results.firstIndex(where: { $0.outcome == .pending }) else { return }
         results[i].outcome = outcome
+        if outcome == .confirmed || outcome == .unconfirmed, let word = results[i].prediction.best?.label {
+            contextWord = word
+            contextTime = Date()
+        }
         switch outcome {
         case .confirmed:
             model.cues.play(.accept)
