@@ -1,0 +1,280 @@
+import AppKit
+import Foundation
+import LouVoiceCore
+import Observation
+
+/// Capture timing (D13). Changing it affects new takes only.
+struct CaptureSettings: Codable, Hashable {
+    var preroll = 0.3
+    var window = 1.8
+}
+
+@MainActor @Observable
+final class AppModel {
+    enum Screen: String, CaseIterable, Identifiable {
+        case sensors = "Sensors", enroll = "Enroll", evaluate = "Evaluate", tune = "Tune", decode = "Decode"
+        var id: String { rawValue }
+        var symbol: String {
+            switch self {
+            case .sensors: "waveform.path.ecg"
+            case .enroll: "list.bullet.clipboard"
+            case .evaluate: "checkmark.seal"
+            case .tune: "slider.horizontal.3"
+            case .decode: "text.bubble"
+            }
+        }
+    }
+
+    let hub = MotionHub()
+    let cues = CueService()
+    let stem = StemPress()
+    @ObservationIgnored private(set) lazy var enrollment = Enrollment(model: self)
+    @ObservationIgnored private(set) lazy var decoder = Decoder(model: self)
+
+    var screen: Screen = .enroll
+    private(set) var dataset: Dataset
+    private(set) var classifier: Classifier?
+    private(set) var isTraining = false
+    private(set) var evaluation: EvaluationReport?
+    private(set) var quizScore: (correct: Int, total: Int, perLabel: [String: (Int, Int)])?
+    private(set) var isEvaluating = false
+    private(set) var evaluationProgress = 0.0
+
+    /// Pipeline variables (Tune screen). Changing them re-extracts features and retrains.
+    private(set) var config: PipelineConfig
+    var capture: CaptureSettings { didSet { Self.store(capture, key: Self.captureKey) } }
+
+    // Auto-tune state.
+    private(set) var tuneTrials: [Tuner.Trial] = []
+    private(set) var isTuning = false
+    private(set) var tuneProgress = 0.0
+    private(set) var tuneStatus = ""
+
+    @ObservationIgnored private var featureCache: [UUID: SegmentFeatures] = [:]
+    @ObservationIgnored private var keyMonitor: Any?
+    @ObservationIgnored private var rebuildTask: Task<Void, Never>?
+    @ObservationIgnored private var started = false
+
+    static let configKey = "pipelineConfig.v1", captureKey = "captureSettings.v1"
+
+    init() {
+        // --smoke (and LOUVOICE_SOURCE=simulator) start on the simulator without touching CoreMotion.
+        let simulated = CommandLine.arguments.contains("--smoke")
+            || ProcessInfo.processInfo.environment["LOUVOICE_SOURCE"] == "simulator"
+        if simulated { hub.source = .simulator }
+        dataset = DatasetStore.load(simulated: simulated)
+        let isolated = ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] != nil
+        config = isolated ? .defaults : (Self.load(PipelineConfig.self, key: Self.configKey) ?? .defaults)
+        capture = isolated ? CaptureSettings() : (Self.load(CaptureSettings.self, key: Self.captureKey) ?? CaptureSettings())
+    }
+
+    func start() {
+        guard !started else { return }
+        started = true
+        hub.onSample = { [weak self] s in self?.decoder.ingest(s) }
+        stem.onPress = { [weak self] in self?.stemPressed() }
+        if CommandLine.arguments.contains("--smoke") { SmokeTest(model: self).run() }
+        hub.start()
+        installKeyMonitor()
+        rebuildClassifier()
+    }
+
+    var isSimulated: Bool { hub.isSimulated }
+
+    func setSource(_ source: MotionHub.Source) {
+        guard source != hub.source else { return }
+        enrollment.stop()
+        hub.source = source
+        dataset = DatasetStore.load(simulated: source == .simulator)
+        featureCache.removeAll()
+        clearResults()
+        rebuildClassifier()
+    }
+
+    // MARK: Config
+
+    func setConfig(_ new: PipelineConfig) {
+        guard new != config else { return }
+        if new.features != config.features { featureCache.removeAll() }
+        config = new
+        Self.store(config, key: Self.configKey)
+        clearResults()
+        rebuildClassifier()
+    }
+
+    func updateConfig(_ change: (inout PipelineConfig) -> Void) {
+        var c = config
+        change(&c)
+        setConfig(c)
+    }
+
+    private func clearResults() {
+        evaluation = nil
+        quizScore = nil
+    }
+
+    // MARK: Dataset
+
+    var words: [String] { dataset.vocabulary }
+
+    func features(for take: Take) -> SegmentFeatures? {
+        if let f = featureCache[take.id] { return f }
+        let f = Features.extract(take.samples, config: config.features)
+        featureCache[take.id] = f
+        return f
+    }
+
+    func addTake(_ take: Take, features: SegmentFeatures) {
+        dataset.takes.append(take)
+        featureCache[take.id] = features
+        persist(retrain: !take.isTest)
+    }
+
+    func deleteTakes(where predicate: (Take) -> Bool) {
+        dataset.takes.removeAll(where: predicate)
+        persist()
+    }
+
+    /// Quiz takes become training data (more data is the biggest lever with ~9 takes per word).
+    func promoteQuizTakes() {
+        for i in dataset.takes.indices where dataset.takes[i].isTest { dataset.takes[i].isTest = false }
+        persist()
+    }
+
+    func setNoiseFloor(_ value: Double?) {
+        dataset.noiseFloor = value
+        DatasetStore.save(dataset, simulated: isSimulated)
+    }
+
+    func addWord(_ raw: String) {
+        let word = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !word.isEmpty, word != noneLabel, !dataset.vocabulary.contains(word) else { return }
+        dataset.vocabulary.append(word)
+        DatasetStore.save(dataset, simulated: isSimulated)
+    }
+
+    func removeWord(_ word: String) {
+        dataset.vocabulary.removeAll { $0 == word }
+        DatasetStore.save(dataset, simulated: isSimulated)
+    }
+
+    func takeCount(_ label: String) -> Int { dataset.trainingTakes.filter { $0.label == label }.count }
+    var blocks: [String] { Array(Set(dataset.takes.map(\.block))).sorted() }
+
+    private func persist(retrain: Bool = true) {
+        DatasetStore.save(dataset, simulated: isSimulated)
+        clearResults()
+        if retrain { rebuildClassifier() }
+    }
+
+    // MARK: Training / evaluation
+
+    func trainingFeatures(excludingBlock block: String? = nil) -> [LabeledFeatures] {
+        dataset.trainingTakes.filter { $0.block != block }.compactMap { take in
+            features(for: take).map { LabeledFeatures(id: take.id.uuidString, label: take.label, features: $0.sequence) }
+        }
+    }
+
+    func rebuildClassifier() {
+        rebuildTask?.cancel()
+        let training = trainingFeatures()
+        let classifierConfig = config.classifier
+        isTraining = true
+        rebuildTask = Task { [weak self] in
+            let built = await Task.detached(priority: .userInitiated) { Classifier(training: training, config: classifierConfig) }.value
+            guard !Task.isCancelled, let self else { return }
+            self.classifier = built
+            self.isTraining = false
+        }
+    }
+
+    func runEvaluation() {
+        guard !isEvaluating else { return }
+        let takes = dataset.trainingTakes.compactMap { take in
+            features(for: take).map { EvalTake(id: take.id.uuidString, label: take.label, block: take.block, features: $0.sequence) }
+        }
+        let training = dataset.trainingTakes.map(Tuner.RawTake.init)
+        let tests = dataset.testTakes.map(Tuner.RawTake.init)
+        let config = config
+        isEvaluating = true
+        evaluationProgress = 0
+        let box = WeakModel(self)
+        Task { [weak self] in
+            let (report, quiz) = await Task.detached(priority: .userInitiated) {
+                let r = Evaluation.run(takes, config: config.classifier, permutations: 200) { p in
+                    Task { @MainActor in box.model?.evaluationProgress = p }
+                }
+                let q = tests.isEmpty ? nil : Tuner.heldOut(training: training, test: tests, config: config)
+                return (r, q)
+            }.value
+            self?.evaluation = report
+            self?.quizScore = quiz
+            self?.isEvaluating = false
+        }
+    }
+
+    // MARK: Auto-tune
+
+    func runAutoTune() {
+        guard !isTuning else { return }
+        let takes = dataset.trainingTakes.map(Tuner.RawTake.init)
+        let base = config
+        isTuning = true
+        tuneProgress = 0
+        tuneStatus = "Starting…"
+        let box = WeakModel(self)
+        Task { [weak self] in
+            let trials = await Task.detached(priority: .userInitiated) {
+                Tuner.autoTune(takes, base: base) { p, status in
+                    Task { @MainActor in box.model?.tuneProgress = p; box.model?.tuneStatus = status }
+                }
+            }.value
+            self?.tuneTrials = trials
+            self?.isTuning = false
+            self?.tuneStatus = trials.isEmpty ? "Not enough data (need 2+ blocks)" : "Tried \(trials.count) settings"
+        }
+    }
+
+    // MARK: Input
+
+    private func stemPressed() {
+        if screen == .decode { decoder.trigger() }
+        else if screen == .enroll { enrollment.continueAfterBreak() }
+    }
+
+    private func installKeyMonitor() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            if NSApp.keyWindow?.firstResponder is NSText { return event }
+            let consumed: Bool = MainActor.assumeIsolated {
+                switch (event.keyCode, self.screen) {
+                case (49, .decode): if !event.isARepeat { self.decoder.trigger() }; return true          // Space
+                case (49, .enroll): self.enrollment.continueAfterBreak(); return true
+                case (16, .decode): self.decoder.confirm(true); return true                               // Y
+                case (45, .decode): self.decoder.confirm(false); return true                              // N
+                default: return false
+                }
+            }
+            return consumed ? nil : event
+        }
+    }
+
+    // MARK: Persistence of settings
+
+    private static func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func store<T: Encodable>(_ value: T, key: String) {
+        guard ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] == nil,
+              let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+/// Lets a background progress callback reach the main-actor model without capturing it.
+private final class WeakModel: @unchecked Sendable {
+    weak var model: AppModel?
+    init(_ model: AppModel) { self.model = model }
+}
