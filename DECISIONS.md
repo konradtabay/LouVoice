@@ -700,3 +700,19 @@ Clicking outside the list or pressing Escape closes it. The rows that contain it
 - `SignalPreview` previously used the Signals page's fixed ±1.6 rad/s scale, where mouthing (0.1–0.2 rad/s, D43) was a near-flat line.
 - Each rotation axis is now centred on its mean over the 10 s window, and the scale follows the largest recent movement × 1.1, never tighter than ±0.12 rad/s (`SignalPreview.minRange`, `TODO(team)`), so rest noise (~0.02) stays a thin band.
 - The preview is 110 pt tall instead of 90. The Signals page keeps its fixed scale.
+
+### D61: Word-by-word sentence fallback plays on the chosen output (2026-11-08). *Fixes D58.*
+**Problem:** "Speak aloud" set to the MacBook speakers still played on the AirPods.
+
+**Checked** (standalone test, volume 0, reading `kAudioDevicePropertyDeviceIsRunningSomewhere` per device): `AVAudioPlayer.currentDevice = "BuiltInSpeakerDevice"` does start the speakers (single clips, D56 whole sentences, the rendered system voice). `AVPlayer` / `AVQueuePlayer.audioOutputDeviceUniqueID` did **not**: the speakers stayed idle and the default output (AirPods) played. That queue was the word-by-word fallback for a sentence.
+
+**Fix:** The fallback chains the clips on `AVAudioPlayer` (`ClipSequence`, a delegate that starts the next clip when one finishes), each with `currentDevice` set. Re-tested: the speakers run for the whole sequence. Starting a single clip stops any running sequence.
+
+**Still on the default output:** the prompt beeps and spoken prompts (`CueService`), on purpose: they're for the wearer.
+
+### D62: Speak aloud warns when the chosen output is muted in macOS (2026-11-08)
+**Problem:** Speak aloud set to MacBook Pro Speakers was silent. The speakers were muted at the macOS level (mute = 1, volume 1.00). The AirPods were the system default output, so the menu-bar volume showed the AirPods (not muted) and the speakers' mute wasn't visible anywhere. The app was routing correctly (D61) into a muted device.
+
+**Change:** `AudioOutputs.isSilent(uid)` reads the device's output mute and volume (main and per-channel elements). The Speak aloud menu re-checks whenever it opens: a muted or zero-volume device shows "Muted in macOS" under its name, and the closed button shows "(muted)" after the selected device. The app doesn't change system audio settings itself; unmute in Control Center › Sound.
+
+**Checked:** with the current hardware state, MacBook Pro Speakers → silent, AirPods Pro → not silent.

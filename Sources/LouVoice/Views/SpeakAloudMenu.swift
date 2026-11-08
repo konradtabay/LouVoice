@@ -13,6 +13,7 @@ struct SpeakAloudMenu: View {
     var showsTitle = true
     @State private var open = false
     @State private var devices: [AudioOutputs.Device] = []
+    @State private var silent: Set<String> = []   // outputs muted / at zero volume in macOS (D62)
     @State private var systemDefault: AudioOutputs.Device?
 
     static let listWidth: CGFloat = 320
@@ -33,7 +34,7 @@ struct SpeakAloudMenu: View {
             .foregroundStyle(open ? LV.pearl : LV.ink)
             .padding(.horizontal, 16)
             .frame(height: 48)
-            .background(open ? LV.ink : LV.card)
+            .background(open ? LV.ink : LV.pearl)  // same off-white as the outline buttons (Recalibrate)
             .overlay(Rectangle().strokeBorder(LV.ink, lineWidth: 1))
             .contentShape(Rectangle())
         }
@@ -72,7 +73,8 @@ struct SpeakAloudMenu: View {
             Row(title: "System default", detail: systemDefault?.name, icon: "macbook",
                 selected: d.speakResult && v.outputDeviceUID == nil) { select(nil) }
             ForEach(devices) { dev in
-                Row(title: dev.name, detail: nil, icon: Self.icon(for: dev.name),
+                Row(title: dev.name, detail: silent.contains(dev.uid) ? "Muted in macOS" : nil,
+                    icon: Self.icon(for: dev.name),
                     selected: d.speakResult && v.outputDeviceUID == dev.uid) { select(dev.uid) }
             }
             Rule()
@@ -80,6 +82,7 @@ struct SpeakAloudMenu: View {
                 .padding(.bottom, 6)
         }
         .frame(width: Self.listWidth, alignment: .leading)
+        .onAppear(perform: refresh)   // mute state may have changed since the menu was last opened
         .background(LV.pearl)
         .overlay(Rectangle().strokeBorder(LV.ink, lineWidth: 1))
         .background(Rectangle().fill(LV.heart).offset(x: 5, y: 5))   // the site's offset shadow
@@ -89,7 +92,7 @@ struct SpeakAloudMenu: View {
         let d = model.decoder, v = model.voice
         guard d.speakResult else { return "Off" }
         guard let uid = v.outputDeviceUID else { return "System default" }
-        if let dev = devices.first(where: { $0.uid == uid }) { return dev.name }
+        if let dev = devices.first(where: { $0.uid == uid }) { return dev.name + (silent.contains(uid) ? " (muted)" : "") }
         return "System default (device not connected)"
     }
 
@@ -101,6 +104,7 @@ struct SpeakAloudMenu: View {
 
     private func refresh() {
         devices = AudioOutputs.list()
+        silent = Set(devices.map(\.uid).filter(AudioOutputs.isSilent))
         systemDefault = AudioOutputs.systemDefault()
     }
 

@@ -47,7 +47,7 @@ final class VoiceService {
     private(set) var lastTextOnly: String?
 
     @ObservationIgnored private var player: AVAudioPlayer?
-    @ObservationIgnored private var sequencePlayer: AVQueuePlayer?
+    @ObservationIgnored private var sequencePlayer: ClipSequence?
     @ObservationIgnored private let fallback = AVSpeechSynthesizer()
     @ObservationIgnored private let log = Logger(subsystem: "LouVoice", category: "voice")
     static let settingsKey = "voiceSettings.v2"
@@ -225,10 +225,12 @@ final class VoiceService {
             cachedWords.insert(w)
             urls.append(u)
         }
-        let queue = AVQueuePlayer(items: urls.map { AVPlayerItem(url: $0) })
-        queue.audioOutputDeviceUniqueID = routeUID
-        queue.play()
-        sequencePlayer = queue
+        // AVQueuePlayer ignores audioOutputDeviceUniqueID here (checked: it stayed on the default
+        // output), so the clips are chained on AVAudioPlayer, which honours `currentDevice` (D61).
+        player?.stop()
+        let sequence = ClipSequence(urls: urls, device: routeUID)
+        guard sequence.start() else { return finish(text, .textOnly, start, played: false) }
+        sequencePlayer = sequence
         return finish(text, .live, start, played: true)
     }
 
@@ -289,6 +291,8 @@ final class VoiceService {
     }
 
     private func play(_ url: URL, keepFile: Bool = false) -> Bool {
+        sequencePlayer?.stop()
+        sequencePlayer = nil
         do {
             let p = try AVAudioPlayer(contentsOf: url)
             p.currentDevice = routeUID
@@ -343,5 +347,46 @@ final class VoiceService {
     private func saveVoiceID() {
         guard !isolated else { return }
         UserDefaults.standard.set(voiceID, forKey: Self.voiceIDKey)
+    }
+}
+
+/// Plays clips one after another on a chosen output device (`AVAudioPlayer.currentDevice`, nil =
+/// system default). Used for the word-by-word sentence fallback (D61).
+final class ClipSequence: NSObject, AVAudioPlayerDelegate {
+    private var urls: [URL]
+    private let device: String?
+    private var current: AVAudioPlayer?
+
+    init(urls: [URL], device: String?) {
+        self.urls = urls
+        self.device = device
+    }
+
+    /// Starts the first clip that can play; false if none can.
+    func start() -> Bool {
+        while !urls.isEmpty {
+            let url = urls.removeFirst()
+            guard let p = try? AVAudioPlayer(contentsOf: url) else { continue }
+            p.currentDevice = device
+            p.delegate = self
+            p.prepareToPlay()
+            if p.play() {
+                current = p
+                return true
+            }
+        }
+        current = nil
+        return false
+    }
+
+    func stop() {
+        urls.removeAll()
+        current?.stop()
+        current = nil
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard player === current else { return }
+        _ = start()
     }
 }
