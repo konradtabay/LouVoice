@@ -73,6 +73,13 @@ final class Enrollment {
         "you": "Push the lips forward into a tight \"OO\", jaw nearly still",
         "hear": "Small open, then pull the corners back: \"HEE-er\"",
         "me": "Press the lips together hard, then a wide smile: \"m-EE\"",
+        "my": "Lips together, then drop the jaw wide: \"m-AI\"",
+        "name": "Lips together twice: \"N-AY-m\", jaw half open in the middle",
+        "is": "Tiny and quick: small smile, teeth almost closed, \"IZ\"",
+        "konrad": "Two strong beats: big drop on \"KON\", then \"rad\"",
+        "how": "Open wide, then round the lips: \"HA-OW\"",
+        "are": "One long open jaw: \"AAR\"",
+        "today": "Two beats: small \"tuh\", then wide \"DAY\"",
     ]
 
     private(set) var mode: Mode = .train
@@ -93,8 +100,14 @@ final class Enrollment {
         var exact: Bool { said == heard }
     }
     private(set) var sentenceResults: [SentenceResult] = []
+    /// Phrases prompted in the current sentence session.
+    private(set) var sentencePhrases: [[String]] = []
     var sentenceReps = 5
     var sentenceBlocks = 3
+    /// Prompt random contiguous parts of the phrase ("hello can", "you hear me") as well as the whole (D44).
+    var varySentenceLength = false
+    /// Share of takes that are the full phrase when varying length.
+    static let fullPhraseShare = 0.4
 
     static let readyPause = 0.9, maxAttempts = 3
 
@@ -148,8 +161,14 @@ final class Enrollment {
     /// Mouth the whole phrase, flowing, each take (D40). Each take is decoded by a model that
     /// hasn't seen this block, then aligned to the known words and cut into word takes.
     func startSentences(phrase: String, reps: Int, blocks: Int) {
-        let words = phrase.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
-        guard task == nil, words.count >= 2 else { return }
+        startSentences(phrases: [phrase], reps: reps, blocks: blocks)
+    }
+
+    /// Several phrases: each take picks one at random (balanced per block), e.g. both demo sentences (D45).
+    func startSentences(phrases: [String], reps: Int, blocks: Int) {
+        let list = phrases.map { $0.lowercased().split(whereSeparator: \.isWhitespace).map(String.init) }.filter { $0.count >= 2 }
+        guard task == nil, let words = list.first else { return }
+        sentencePhrases = list
         let session = Self.stamp()
         mode = .sentence
         totalBlocks = blocks
@@ -161,7 +180,16 @@ final class Enrollment {
         }
     }
 
-    private func runSentences(phrase: String, words: [String], reps: Int, blocks: Int, session: String) async {
+    /// The words to prompt for one sentence take.
+    private func pickSentence(_ words: [String]) -> [String] {
+        let words = sentencePhrases.count > 1 ? (sentencePhrases.randomElement() ?? words) : words
+        guard varySentenceLength, words.count > 2, Double.random(in: 0..<1) >= Self.fullPhraseShare else { return words }
+        let len = Int.random(in: 2...(words.count - 1))
+        let start = Int.random(in: 0...(words.count - len))
+        return Array(words[start..<(start + len)])
+    }
+
+    private func runSentences(phrase: String, words fullWords: [String], reps: Int, blocks: Int, session: String) async {
         let hub = model.hub, cues = model.cues
         for b in 1...blocks {
             block = b
@@ -175,8 +203,11 @@ final class Enrollment {
             let blockID = "sentence-\(session)-b\(b)"
             let honest = await buildClassifier(excluding: blockID)
             var done = 0, attempts = 0
+            var words = pickSentence(fullWords)
             while done < reps {
                 if Task.isCancelled { return }
+                if attempts == 0 { words = pickSentence(fullWords) }
+                let phrase = words.joined(separator: " ")
                 let prompt = Prompt(label: phrase, text: phrase, action: .word(words[0]))
                 phase = .ready(prompt, quiz: false)
                 cues.say(phrase)
@@ -185,7 +216,8 @@ final class Enrollment {
                 phase = .recording(prompt, quiz: false)
                 cues.play(.start)
                 if hub.isSimulated { simulateSentence(words) }
-                let sc = model.config.sentence
+                var sc = model.config.sentence
+                sc.windowSeconds = max(2.5, sc.windowSeconds * Double(words.count) / 5.0 + 1.5)
                 let samples = sc.stopWhenQuiet
                     ? await hub.captureUntilQuiet(preroll: model.capture.preroll, maxWindow: sc.windowSeconds, quiet: sc.stopAfterQuietSeconds)
                     : await hub.capture(preroll: model.capture.preroll, window: sc.windowSeconds)
@@ -209,8 +241,14 @@ final class Enrollment {
                 // 1. Honest test: decode with a model that never saw this block.
                 var heard: [String]?
                 if let honest, let dec = SentenceDecoder(classifier: honest, pipeline: config, config: config.sentence) {
+                    // While practising parts, the honest test must allow parts too.
+                    var ctx = config.context
+                    ctx.phrases = Array(Set(sentencePhrases.map { $0.joined(separator: " ") } + ctx.phrases))
+                    if varySentenceLength { ctx.includeParts = true }
+                    // Honest: whole-sentence references only from other blocks.
+                    let others = model.dataset.sentenceTakes.filter { $0.block != blockID }.map { (label: $0.label, samples: $0.samples) }
                     heard = await Task.detached(priority: .userInitiated) {
-                        dec.decode(samples, context: config.context)?.words.map(\.label)
+                        dec.decodeSentence(samples, context: ctx, references: dec.sentenceReferences(others))?.words.map(\.label)
                     }.value
                 }
                 if let heard { sentenceResults.append(SentenceResult(said: words, heard: heard, block: b)) }

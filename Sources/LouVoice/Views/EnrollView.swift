@@ -2,6 +2,8 @@ import LouVoiceCore
 import SwiftUI
 
 struct EnrollView: View {
+    /// Words with fewer training takes than this count as new. TODO(team): 9 = 3 blocks × 3 reps.
+    static let newWordTakes = 9
     @Environment(AppModel.self) private var model
     @State private var newWord = ""
     @State private var teachWord = ""
@@ -113,25 +115,38 @@ struct EnrollView: View {
                 if e.isRunning {
                     Button("Stop", role: .destructive) { e.stop() }
                 } else {
-                    Button("Start training") {
-                        e.start(words: model.words, reps: e.reps, blocks: e.blockCount, noisePerBlock: e.noisePerBlock)
+                    let newWords = model.words.filter { model.takeCount($0) < Self.newWordTakes }
+                    HStack {
+                        Button("Start training") {
+                            e.start(words: model.words, reps: e.reps, blocks: e.blockCount, noisePerBlock: e.noisePerBlock)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canRecord || model.words.isEmpty)
+                        // New words only (fewer than 9 takes), with a few non-word prompts so `_none` keeps up.
+                        Button("Train new words only (\(newWords.count))") {
+                            e.start(words: newWords, reps: e.reps, blocks: e.blockCount, noisePerBlock: min(e.noisePerBlock, 2))
+                        }
+                        .disabled(!canRecord || newWords.isEmpty)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canRecord || model.words.isEmpty)
+                    if !newWords.isEmpty {
+                        Text("New: " + newWords.joined(separator: ", ")).font(.caption).foregroundStyle(.orange)
+                    }
                 }
             }
             SectionCard(title: "Sentence training (flowing)") {
                 Picker("Phrase", selection: $sentencePhrase) {
+                    Text("All demo phrases (mixed)").tag("")
                     ForEach(model.config.context.phrases.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }, id: \.self) { Text($0).tag($0) }
                 }
-                Stepper("Sentences per block: \(e.sentenceReps)", value: $e.sentenceReps, in: 1...10)
+                Stepper("Sentences per block: \(e.sentenceReps)", value: $e.sentenceReps, in: 1...12)
+                Toggle("Vary the length (\"hello can\", \"you hear me\", …)", isOn: $e.varySentenceLength)
                 Stepper("Blocks: \(e.sentenceBlocks)", value: $e.sentenceBlocks, in: 1...6)
                 Text(String(format: "Up to %.1f s, ends when you stop (Tune › Sentence). ≈ %d min.", model.config.sentence.windowSeconds,
                             max(1, Int(Double(e.sentenceReps * e.sentenceBlocks) * (model.config.sentence.windowSeconds + 3.5) / 60))))
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Start sentence training") {
-                    e.startSentences(phrase: sentencePhrase.isEmpty ? (model.config.context.phrases.first ?? "") : sentencePhrase,
-                                     reps: e.sentenceReps, blocks: e.sentenceBlocks)
+                    let all = model.config.context.phrases.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                    e.startSentences(phrases: sentencePhrase.isEmpty ? all : [sentencePhrase], reps: e.sentenceReps, blocks: e.sentenceBlocks)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!canRecord || model.classifier == nil)

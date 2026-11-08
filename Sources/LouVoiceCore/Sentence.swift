@@ -19,6 +19,13 @@ public struct SentenceConfig: Codable, Hashable, Sendable {
     public var maxWordSeconds = 1.2
     /// Most words in one sentence.
     public var maxWords = 8
+    /// Demo mode (D45): only ever output one of the expected phrases, whichever fits the motion best.
+    public var onlyExpectedPhrases = true
+    /// Demo mode (D47): say "no sentence" for random movement. Score = ln(align cost per frame ÷ 0.5)
+    /// + ln(nearest recorded sentence ÷ nearest recorded movement/single word); reject at ≥ threshold.
+    /// TODO(team): 0.6 kept 42/45 real sentences, accepted 0/54 movements and 45/593 single words.
+    public var rejectNothing = true
+    public var rejectThreshold = 0.6
     /// Cost added per word: higher → fewer, longer words. 0 suits fast, flowing speech (D40).
     public var insertionPenalty = 0.0
     /// Weight of −log P(word | previous) per unit of context strength: Strong (0.5) → 4 (D40).
@@ -27,6 +34,15 @@ public struct SentenceConfig: Codable, Hashable, Sendable {
     public var templatesPerWord = 12
     /// Mean of the k best template distances per segment.
     public var k = 2
+    /// Tempo model (D44): a sentence is spoken at one roughly steady pace, so every word is squashed by
+    /// about the same factor. The decoder tries these paces (word length ÷ typical trained length)
+    /// and charges `durationWeight · ln(actual / expected)²` per word. 0 = off.
+    public var tempos: [Double] = [1.0, 0.75, 0.55, 0.42, 0.33, 0.27]
+    public var durationWeight = 0.0
+    /// Your usual sentence pace (word length ÷ trained length), measured from sentence training;
+    /// nil = unknown. The decoder prefers paces near it, which pins down sentence length (D44).
+    public var expectedTempo: Double? = nil
+    public var tempoPriorWeight = 8.0
     /// How much a template may be squashed / stretched to fit a segment (segment length ÷ template length).
     public var minCompression = 0.25   // D43: fast, flowing words are ~¼ of an isolated take
     public var maxStretch = 2.0
@@ -51,6 +67,9 @@ public struct SentenceResult: Sendable {
     public var startOffset: Double
     /// Seconds between the last word's end and the end of the capture window.
     public var trailingSeconds: Double
+    /// Demo mode: set when the motion didn't look like any expected sentence (D47).
+    public var rejectReason: String? = nil
+    public var sentenceScore: Double? = nil
 
     public init(words: [SentenceWord], rate: Double, startOffset: Double, trailingSeconds: Double) {
         self.words = words; self.rate = rate; self.startOffset = startOffset; self.trailingSeconds = trailingSeconds
@@ -163,6 +182,14 @@ public struct SentenceDecoder: Sendable {
         let S = trie.stateCount
         let lm = config.contextWeight * context.weight
         let M = config.maxWords
+        // Typical trained length of each word (median real template), for the tempo model.
+        let typical: [Double] = vocab.map { w in
+            let ls = (templates[w] ?? []).map { Double($0.count) }.sorted()
+            return ls.isEmpty ? 1 : ls[ls.count / 2]
+        }
+        var bestWords: [SentenceWord] = []
+        var bestTotal = Double.infinity
+        for tempo in (config.durationWeight > 0 ? config.tempos : [1.0]) {
         // best[j][state][m]: cost of frames 0..<j as m words, ending in prefix-tree state `state`.
         var best = [[[Double]]](repeating: [[Double]](repeating: [Double](repeating: .infinity, count: M + 1), count: S), count: n + 1)
         var back = [[[(i: Int, s: Int, w: Int)]]](repeating: [[(Int, Int, Int)]](repeating: [(Int, Int, Int)](repeating: (-1, -1, -1), count: M + 1), count: S), count: n + 1)
@@ -176,7 +203,11 @@ public struct SentenceDecoder: Sendable {
                             let seg = costs[i][len][w]
                             guard seg.isFinite else { continue }
                             let (next, logP) = trie.step(st, w)
-                            let c = best[i][st][m] + seg * Double(len) + config.insertionPenalty - lm * logP
+                            var c = best[i][st][m] + seg * Double(len) + config.insertionPenalty - lm * logP
+                            if config.durationWeight > 0 {
+                                let r = log(Double(len) / (tempo * typical[w]))
+                                c += config.durationWeight * r * r
+                            }
                             if c < best[j][next][m + 1] { best[j][next][m + 1] = c; back[j][next][m + 1] = (i, st, w) }
                         }
                     }
@@ -189,7 +220,11 @@ public struct SentenceDecoder: Sendable {
             let c = best[n][st][m] - lm * trie.endLog(st)
             if c < end.c { end = (st, m, c) }
         } }
-        guard end.s >= 0 else { return [] }
+        var total = end.c
+        if let t0 = config.expectedTempo, config.durationWeight > 0 {
+            let r = log(tempo / t0); total += config.tempoPriorWeight * r * r
+        }
+        guard end.s >= 0, total < bestTotal else { continue }
         var out: [SentenceWord] = []
         var j = n, st = end.s, m = end.m
         while m >= 1 {
@@ -201,7 +236,10 @@ public struct SentenceDecoder: Sendable {
             out.append(SentenceWord(label: vocab[w], start: i, end: j, cost: costs[i][len][w], alternatives: alts))
             j = i; st = prev; m -= 1
         }
-        return out.reversed()
+        bestTotal = total
+        bestWords = out.reversed()
+        }
+        return bestWords
     }
 
     public func decode(_ samples: [MotionSample], context: ContextModel, active: Set<String>? = nil) -> SentenceResult? {
@@ -243,6 +281,60 @@ public struct SentenceDecoder: Sendable {
             j = i
         }
         return out.reversed()
+    }
+
+    /// Demo mode (D45): align the motion to each candidate phrase in full and pick the best fit.
+    /// Total alignment cost covers every frame for every candidate, so costs are directly comparable.
+    /// Returns the winning words, its index, and the margin to the runner-up (1 − best/second).
+    public func choose(_ seq: FeatureSequence, among phrases: [[String]]) -> (words: [SentenceWord], index: Int, margin: Double)? {
+        var scored: [(Int, [SentenceWord], Double)] = []
+        for (i, phrase) in phrases.enumerated() {
+            guard let aligned = align(seq, phrase: phrase) else { continue }
+            let total = aligned.reduce(0) { $0 + $1.cost * Double($1.end - $1.start) }
+            scored.append((i, aligned, total))
+        }
+        scored.sort { $0.2 < $1.2 }
+        guard let best = scored.first else { return nil }
+        let margin = scored.count > 1 && scored[1].2 > 0 ? max(0, 1 - best.2 / scored[1].2) : 1
+        return (best.1, best.0, margin)
+    }
+
+    /// Phrases whose words all have templates (so they can be aligned).
+    public func trainedPhrases(_ phrases: [[String]]) -> [[String]] {
+        phrases.filter { $0.allSatisfy { templates[$0] != nil } }
+    }
+
+    /// Sentence decode honouring demo mode: choose among expected phrases, else free decoding.
+    public func decodeSentence(_ samples: [MotionSample], context: ContextModel, active: Set<String>? = nil,
+                               references: [String: [FeatureSequence]] = [:]) -> SentenceResult? {
+        guard let f = features(samples) else { return nil }
+        let candidates = trainedPhrases(context.tokenized)
+        let words: [SentenceWord]
+        if config.onlyExpectedPhrases, !candidates.isEmpty {
+            // With recorded sentences for every candidate, combine both votes (D46); else alignment only.
+            let refs = candidates.map { references[$0.joined(separator: " ")] ?? [] }
+            if candidates.count > 1, refs.allSatisfy({ !$0.isEmpty }) {
+                words = chooseCombined(f.seq, among: candidates, references: refs)?.words ?? []
+            } else {
+                words = choose(f.seq, among: candidates)?.words ?? []
+            }
+            // "No sentence" check (D47).
+            if config.rejectNothing, let nothing = references[noneLabel], !nothing.isEmpty {
+                let perFrame = words.isEmpty ? Double.infinity
+                    : words.reduce(0) { $0 + $1.cost * Double($1.end - $1.start) } / Double(max(f.seq.count, 1))
+                let dSentence = Self.sentenceDistances(f.seq, references: refs.filter { !$0.isEmpty }).min() ?? .infinity
+                let dNothing = Self.sentenceDistances(f.seq, references: [nothing]).first ?? .infinity
+                let score = perFrame.isFinite && dSentence.isFinite && dNothing.isFinite
+                    ? log(perFrame / 0.5) + log(dSentence / max(dNothing, 1e-9)) : Double.infinity
+                var result = SentenceResult(words: words, rate: pipeline.features.rate, startOffset: f.startOffset, trailingSeconds: f.trailing)
+                result.sentenceScore = score
+                if score >= config.rejectThreshold { result.rejectReason = "No sentence detected — looked like other movement" }
+                return result
+            }
+        } else {
+            words = decode(f.seq, context: context, active: active)
+        }
+        return SentenceResult(words: words, rate: pipeline.features.rate, startOffset: f.startOffset, trailingSeconds: f.trailing)
     }
 
     /// Cuts the raw samples of each aligned word (plus a little context) so they can be stored as
@@ -412,5 +504,53 @@ struct PhraseTrie {
         let options = Double(vocabularyCount + 1)
         if state == free { return log(1 / options) }
         return log((ends[state] + smoothing) / (visits[state] + smoothing * options))
+    }
+}
+
+// MARK: - Two independent votes for the demo choice (D46)
+
+extension SentenceDecoder {
+    /// Scaled whole-sentence features of recorded sentence takes, grouped by phrase text.
+    public func sentenceReferences(_ takes: [(label: String, samples: [MotionSample])]) -> [String: [FeatureSequence]] {
+        var out: [String: [FeatureSequence]] = [:]
+        for t in takes { if let f = features(t.samples) { out[t.label, default: []].append(f.seq) } }
+        return out
+    }
+
+    /// Whole-sentence matching: DTW of the entire sentence against recorded sentences of each
+    /// phrase (mean of the k best). `references[i]` holds scaled feature sequences for phrase i.
+    public static func sentenceDistances(_ seq: FeatureSequence, references: [[FeatureSequence]], k: Int = 3) -> [Double] {
+        references.map { refs in
+            let ds = refs.map { DTW.distance(seq, $0, band: 0.3) }.filter(\.isFinite).sorted().prefix(k)
+            return ds.isEmpty ? .infinity : ds.reduce(0, +) / Double(ds.count)
+        }
+    }
+
+    /// Demo choice combining (a) word-by-word alignment cost and (b) whole-sentence matching.
+    /// Each vote is a log-ratio against the mean over candidates, so they're on the same scale;
+    /// a phrase with no recorded sentences uses alignment only.
+    public func chooseCombined(_ seq: FeatureSequence, among phrases: [[String]], references: [[FeatureSequence]],
+                               sentenceWeight: Double = 1) -> (words: [SentenceWord], index: Int, margin: Double)? {
+        var aligned: [[SentenceWord]?] = []
+        var alignCost: [Double] = []
+        for p in phrases {
+            let a = align(seq, phrase: p)
+            aligned.append(a)
+            alignCost.append(a.map { $0.reduce(0) { $0 + $1.cost * Double($1.end - $1.start) } } ?? .infinity)
+        }
+        let sentence = Self.sentenceDistances(seq, references: references)
+        func logNorm(_ xs: [Double]) -> [Double] {
+            let finite = xs.filter(\.isFinite)
+            guard !finite.isEmpty else { return xs.map { _ in 0 } }
+            let mean = finite.map { log($0) }.reduce(0, +) / Double(finite.count)
+            return xs.map { $0.isFinite ? log($0) - mean : 10 }
+        }
+        let a = logNorm(alignCost), s = logNorm(sentence)
+        let haveSentences = sentence.allSatisfy(\.isFinite)
+        let score = phrases.indices.map { a[$0] + (haveSentences ? sentenceWeight * s[$0] : 0) }
+        let order = score.indices.sorted { score[$0] < score[$1] }
+        guard let best = order.first, let words = aligned[best] else { return nil }
+        let margin = order.count > 1 ? score[order[1]] - score[best] : 1
+        return (words, best, margin)
     }
 }

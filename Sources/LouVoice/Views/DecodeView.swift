@@ -66,6 +66,28 @@ struct DecodeView: View {
                     ForEach(ContextModel.Strength.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 Text(model.config.context.strength.detail).font(.caption).foregroundStyle(.secondary)
+                Toggle("Demo: only say one of these phrases", isOn: Binding(
+                    get: { model.config.sentence.onlyExpectedPhrases }, set: { v in model.updateConfig { $0.sentence.onlyExpectedPhrases = v } }))
+                Text(model.config.sentence.onlyExpectedPhrases
+                     ? "Sentence mode picks whichever expected phrase fits your motion best (phrases with untrained words are skipped)."
+                     : "Free decoding: any words in any order, guided by the phrases.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Say \"no sentence\" for random movement", isOn: Binding(
+                    get: { model.config.sentence.rejectNothing }, set: { v in model.updateConfig { $0.sentence.rejectNothing = v } }))
+                if model.config.sentence.rejectNothing {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(format: "Strictness: %.1f (lower = stricter)", model.config.sentence.rejectThreshold)).font(.caption)
+                        Slider(value: Binding(get: { model.config.sentence.rejectThreshold },
+                                              set: { v in model.updateConfig { $0.sentence.rejectThreshold = v } }), in: 0...1.2, step: 0.1)
+                        Text("0.6: keeps 93% of real sentences, rejects all recorded random movement.").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle("Also expect parts (\"hello can\", \"you hear me\")", isOn: Binding(
+                    get: { model.config.context.includeParts }, set: { v in model.updateConfig { $0.context.includeParts = v } }))
+                Text(model.config.context.includeParts
+                     ? "Parts can be recognised, but full sentences get less reliable until there's sentence-training data."
+                     : "Only whole phrases: most reliable for the full sentence.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("Expected phrases, one per line").font(.subheadline)
                 TextEditor(text: Binding(get: { model.config.context.phrases.joined(separator: "\n") },
                                          set: { v in model.updateConfig { $0.context.phrases = v.components(separatedBy: .newlines) } }))

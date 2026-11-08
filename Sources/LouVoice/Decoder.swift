@@ -173,13 +173,15 @@ final class Decoder {
             guard let features = Features.extract(samples, config: config.features) else { self.phase = .idle; return }
             if self.rejectForHeadMovement(features, samples: samples) { return }
             let active = self.activeWords.isEmpty ? nil : self.activeWords
+            let refs = self.model.sentenceReferences
             let sentence = await Task.detached(priority: .userInitiated) {
-                decoder.decode(samples, context: config.context, active: active)
+                decoder.decodeSentence(samples, context: config.context, active: active, references: refs)
             }.value
-            let words = sentence?.words.map(\.label) ?? []
+            let rejected = sentence?.rejectReason
+            let words = rejected == nil ? (sentence?.words.map(\.label) ?? []) : []
             let text = words.joined(separator: " ")
             let prediction = Prediction(ranked: [RankedLabel(label: text, score: 0)], margin: 1,
-                                        accepted: !words.isEmpty, rejectReason: words.isEmpty ? "No words found" : nil)
+                                        accepted: !words.isEmpty, rejectReason: rejected ?? (words.isEmpty ? "No words found" : nil))
             var result = Result(prediction: prediction, outcome: .pending, samples: samples, features: features,
                                 simulatedWord: simText, contextWord: nil, sentence: sentence)
             guard !words.isEmpty else {

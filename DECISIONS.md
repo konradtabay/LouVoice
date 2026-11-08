@@ -436,3 +436,100 @@ The multi-phrase test is unchanged (84% vs 83% whole phrase).
 **Check:** Replayed over 314 recorded word takes, it **never ended mid-word**, and it ended a median 0.88 s after the last movement. All of these settings are on Tune › Sentence.
 
 **Also found:** No ElevenLabs key is set yet, so decodes are spoken by the system voice.
+
+### D44: Varied sentence lengths in training; phrase parts optional in decoding (2026-11-07)
+**Request:** Train on parts of "hello can you hear me" ("hello can", "you hear me"…), not only the full sentence.
+
+**Sentence training:** With "Vary the length" on (the default), each take prompts either the full phrase (40%) or a random contiguous part of 2–4 words. The capture limit scales with the number of words. The honest live score allows parts, and forced alignment uses the prompted words, so every part is cut into correct word takes.
+
+**Decoding parts — measured on stitched held-out takes** (words / whole sentence; Strong; `LouVoiceCheck --parts [--grid|--tempo]`):
+
+| Phrase model | Full ×1 | Full ×2 | Parts ×1 | Parts ×2 |
+|---|---|---|---|---|
+| Full phrase only (**default**) | 99% / 97% | 100% / 100% | 36% / 8% | 37% / 7% |
+| + parts, weight 1 | 95% / 78% | 70% / 9% | 57% / 38% | 42% / 15% |
+| + parts, weight 0.2 | 99% / 97% | 100% / 99% | 43% / 15% | 45% / 21% |
+| + parts 0.5 + tempo model | 98% / 93% | 88% / 73% | 57% / 35% | 48% / 27% |
+| + parts + tempo + **known pace** (best) | 95% / 82% | 90% / 65% | 55% / 36% | 54% / 39% |
+
+**Why it's hard:** With isolated-word templates squashed up to 4× (D43), "can you" at normal pace and "can you hear me" at 2× pace fit the motion equally well, so motion can't fix the sentence length. A tempo model (one steady pace per sentence, ln-ratio duration cost), even given the true pace, only reaches about 35–39% whole-sentence for parts.
+
+**Decision:**
+- Decoding defaults to **whole phrases only**, which keeps the demo sentence reliable. "Also expect parts" is a switch on Decode, with the trade-off shown; it uses `partWeight` 0.5.
+- The tempo model and known-pace prior are implemented but **off** (`durationWeight` 0, `expectedTempo` nil).
+
+**Next:** Varied-length sentence takes provide real fast templates (less squashing), real phrase starts and ends, and the user's real pace. Re-measure parts on **real** sentence takes, and set `expectedTempo` from them, before switching parts on by default.
+
+### D45: Two-sentence demo: "hello can you hear me" and "my name is konrad how are you today" (2026-11-07)
+**Request:** The demo will only ever say one of these two sentences, so make demo and training as accurate as possible for exactly that.
+
+**Changes:**
+- **Vocabulary +7:** my, name, is, konrad, how, are, today ("you" is shared). Each has a mouthing hint.
+- **Train new words only:** an Enroll button trains words with fewer than 9 takes (`TODO(team)`: threshold), with 2 non-word prompts per block.
+- **Expected phrases** default to the two sentences.
+- **Demo mode** (`SentenceConfig.onlyExpectedPhrases`, on by default; a switch on Decode): sentence decoding aligns the motion to **each expected phrase in full** and outputs the best fit. Total alignment cost covers every frame for every candidate, so costs compare directly. It can't output a partial or garbled sentence, and phrases containing untrained words are skipped.
+- **Sentence training:** "All demo phrases (mixed)" is the default. Each take picks one of the two sentences at random, and "Vary the length" now defaults to **off** (full sentences only, as spoken in the demo).
+
+**First real sentence results** (15 recorded "hello can you hear me" takes in 3 blocks, each decoded by a model that never saw its block):
+- **Whole-phrase decoding: 14/15 sentences right**, 95% of words.
+- With phrase parts allowed: 4/15. Confirms parts off.
+- **Two-sentence stand-in** (the second sentence isn't trained yet): against a deliberately hard 7-word decoy built from the *same* trained words, choose-by-alignment picks the right sentence **13/15**, the whole-phrase decoder 12/15. The real second sentence shares only "you", so it should separate more easily.
+- **Known weakness:** neither method can tell the full sentence from its own contiguous parts (4/15). That doesn't matter for this demo.
+
+**To do (needs a person):** Record word blocks for the 7 new words, then mixed sentence training for both sentences. Then measure the real two-sentence accuracy with `LouVoiceCheck --eval … --real-sentences`.
+
+### D46: Two votes for the demo sentence choice: word alignment + whole-sentence matching (2026-11-07). *Extends D45.*
+**Data:** 754 takes:
+- the 7 new words with about 21–25 training takes each (word blocks plus cuts from sentences);
+- **45 real sentence takes**: 29 × "hello can you hear me", 16 × "my name is konrad how are you today".
+
+Isolated-word accuracy across 12 words is 50% held-out (quiz 71%). "today", "are" and "konrad" are 19–28%, still thin. That's not what the demo depends on.
+
+**Two-sentence choice on the real sentence takes** (each block held out, together with the word takes cut from it; `LouVoiceCheck --demo`):
+
+| Method | Right | Sentence 1 | Sentence 2 |
+|---|---|---|---|
+| Choose by word alignment (D45) | 44/45 | 29/29 | 15/16 |
+| Whole-phrase decoder (free) | 24/45 | 24/29 | 0/16 |
+| Whole-sentence matching only | 44/45 | 28/29 | 16/16 |
+| **Combined (chosen)** | **45/45** | **29/29** | **16/16** |
+
+Combined scored 45/45 at sentence weights 0.5, 1 and 2. The two single methods fail on **different** takes, which is why combining them fixes both. Combined margin: smallest 0.05 among correct choices, median 0.54.
+
+**Decision:** Demo mode combines two independent votes:
+- (a) the total cost of aligning the motion to each phrase word by word;
+- (b) DTW of the **whole sentence** against the user's recorded sentences of each phrase (mean of the 3 nearest).
+
+Each vote is a log-ratio against the candidates' mean, summed with weight 1. If any candidate phrase has no recorded sentences, alignment is used alone.
+- The references are rebuilt off the main thread with each retrain (`AppModel.sentenceReferences`).
+- In sentence training, the live honest score uses references from **other** blocks only.
+
+**Caveat:** 45 takes is a small sample, and 100% on it isn't a guarantee. The thinnest correct margin was 0.05. Every extra mixed-sentence block makes vote (b) stronger, and it can be re-checked with `--demo`.
+
+### D47: Demo mode says "no sentence" for random movement (2026-11-07)
+**Request:** Sentence decoding must recognise when no sentence was said, for example random movement.
+
+**Test** (`LouVoiceCheck --reject`; every block held out):
+- **Positives:** the 45 real demo-sentence takes.
+- **Negatives:** 54 recorded movement takes (chew, swallow, turn, nod, smile, look up) and 593 single-word takes, since a lone word isn't one of the demo sentences either.
+
+**Scores per capture:**
+- (a) word-by-word alignment cost per frame for the chosen phrase;
+- (b) distance to the nearest recorded demo sentences ÷ distance to the nearest "nothing" references (movement takes plus 120 single words).
+
+Combined score = ln(a ÷ 0.5) + ln(b); higher means less sentence-like.
+
+**Finding:** Requiring every real sentence to be kept forces thresholds so loose that 8–22 of the 54 movements get through. The combined score gives a clean trade-off:
+
+| Threshold | Sentences kept | Movement accepted | Single words accepted |
+|---|---|---|---|
+| < 0.2 | 39/45 | 0/54 | 8/593 |
+| **< 0.6 (chosen)** | **42/45** | **0/54** | **45/593** |
+| < 0.7 | 43/45 | 3/54 | 62/593 |
+| < 1.0 | 43/45 | 11/54 | 127/593 |
+
+Adding single words to the "nothing" references cut wrongly accepted single words roughly in half compared with movement-only references.
+
+**Decision:** Demo mode rejects at score ≥ 0.6 (`SentenceConfig.rejectThreshold`; `TODO(team)`). It shows "No sentence detected — looked like other movement" and plays the reject tone instead of speaking. A strictness slider and an on/off switch are on Decode. The references are rebuilt with each retrain. The live sentence-training score never rejects.
+
+**Trade-off accepted:** About 1 in 15 real sentences is refused ("try again"), in exchange for never speaking a sentence in response to random movement. More mixed-sentence blocks should tighten real sentences' scores and lower that refusal rate.

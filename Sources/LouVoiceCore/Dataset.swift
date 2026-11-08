@@ -48,7 +48,7 @@ public struct Dataset: Codable, Sendable {
         self.vocabulary = vocabulary; self.takes = takes; self.noiseFloor = noiseFloor
     }
 
-    public static let defaultVocabulary = ["hello", "can", "you", "hear", "me"]
+    public static let defaultVocabulary = ["hello", "can", "you", "hear", "me", "my", "name", "is", "konrad", "how", "are", "today"]
     public static let empty = Dataset(vocabulary: defaultVocabulary, takes: [], noiseFloor: nil)
 
     public var trainingTakes: [Take] { takes.filter { !$0.isTest && !$0.isSentence } }

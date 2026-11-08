@@ -35,6 +35,8 @@ final class AppModel {
     var screen: Screen = .enroll
     private(set) var dataset: Dataset
     private(set) var classifier: Classifier?
+    /// Recorded whole sentences (scaled features by phrase) for the demo's second vote (D46).
+    private(set) var sentenceReferences: [String: [FeatureSequence]] = [:]
     private(set) var isTraining = false
     private(set) var evaluation: EvaluationReport?
     private(set) var quizScore: (correct: Int, total: Int, perLabel: [String: (Int, Int)])?
@@ -190,13 +192,22 @@ final class AppModel {
     func rebuildClassifier() {
         rebuildTask?.cancel()
         let input = trainingInputs()
+        var sentences = dataset.sentenceTakes.map { (label: $0.label, samples: $0.samples) }
+        // "Nothing said" references (D47): recorded movement + a sample of single words.
+        let negatives = dataset.takes.filter { !$0.isTest && !$0.isSentence && !$0.block.hasPrefix("sentence-") }
+        sentences += negatives.filter { $0.label == noneLabel }.map { (label: noneLabel, samples: $0.samples) }
+        sentences += negatives.filter { $0.label != noneLabel }.shuffled().prefix(120).map { (label: noneLabel, samples: $0.samples) }
         isTraining = true
         rebuildTask = Task { [weak self] in
-            let built = await Task.detached(priority: .userInitiated) {
-                Classifier(training: AppModel.buildTraining(input), config: input.config.classifier)
+            let (built, refs) = await Task.detached(priority: .userInitiated) { () -> (Classifier?, [String: [FeatureSequence]]) in
+                let clf = Classifier(training: AppModel.buildTraining(input), config: input.config.classifier)
+                let refs = clf.flatMap { SentenceDecoder(classifier: $0, pipeline: input.config, config: input.config.sentence) }?
+                    .sentenceReferences(sentences) ?? [:]
+                return (clf, refs)
             }.value
             guard !Task.isCancelled, let self else { return }
             self.classifier = built
+            self.sentenceReferences = refs
             self.isTraining = false
         }
     }

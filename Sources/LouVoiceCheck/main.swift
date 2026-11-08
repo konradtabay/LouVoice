@@ -56,6 +56,203 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
         }
     }
 
+    // --reject: scores that separate real demo sentences from random movement and single words (D47).
+    if args.contains("--reject") {
+        let phrases = ContextModel().tokenized
+        let sentences = dataset.sentenceTakes.filter { t in phrases.contains(t.label.split(separator: " ").map(String.init)) }
+        var rows: [(kind: String, perFrame: Double, ratio: Double, active: Double)] = []
+        for block in Set(dataset.takes.map(\.block)).sorted() {
+            let testSent = sentences.filter { $0.block == block }
+            let testNeg = dataset.takes.filter { $0.block == block && !$0.isSentence && !$0.isTest }
+            guard !testSent.isEmpty || !testNeg.isEmpty,
+                  let clf = Classifier(training: TrainingSet.build(train.filter { $0.block != block }, config: .defaults)),
+                  let dec = SentenceDecoder(classifier: clf, pipeline: .defaults) else { continue }
+            let refTakes = sentences.filter { $0.block != block }.map { (label: $0.label, samples: $0.samples) }
+            let refs = dec.sentenceReferences(refTakes)
+            let phraseRefs = phrases.map { refs[$0.joined(separator: " ")] ?? [] }
+            // "Nothing said" references: recorded movement plus single words (other blocks), sampled.
+            var nrng = SeededRNG(seed: 3)
+            let negTakes = dataset.takes.filter { $0.block != block && !$0.isTest && !$0.isSentence && !$0.block.hasPrefix("sentence-") }
+            let noneRefs = (negTakes.filter { $0.label == noneLabel } + Array(negTakes.filter { $0.label != noneLabel }.shuffled(using: &nrng).prefix(120)))
+                .compactMap { dec.features($0.samples)?.seq }
+            func score(_ samples: [MotionSample]) -> (Double, Double, Double)? {
+                guard let f = dec.features(samples), f.seq.count >= 6 else { return nil }
+                let costs = phrases.compactMap { p in dec.align(f.seq, phrase: p).map { $0.reduce(0) { $0 + $1.cost * Double($1.end - $1.start) } / Double(f.seq.count) } }
+                let dPhrase = SentenceDecoder.sentenceDistances(f.seq, references: phraseRefs).min() ?? .infinity
+                let dNone = SentenceDecoder.sentenceDistances(f.seq, references: [noneRefs]).first ?? .infinity
+                return (costs.min() ?? .infinity, dPhrase / max(dNone, 1e-9), Double(f.seq.count) / 25)
+            }
+            for t in testSent { if let sc = score(t.samples) { rows.append(("sentence", sc.0, sc.1, sc.2)) } }
+            for t in testNeg.prefix(40) {
+                if let sc = score(t.samples) { rows.append((t.label == noneLabel ? "movement" : "single word", sc.0, sc.1, sc.2)) }
+            }
+        }
+        for kind in ["sentence", "movement", "single word"] {
+            let r = rows.filter { $0.kind == kind }
+            guard !r.isEmpty else { continue }
+            func q(_ xs: [Double], _ p: Double) -> Double { let s = xs.sorted(); return s[min(s.count - 1, Int(Double(s.count) * p))] }
+            let pf = r.map(\.perFrame), ra = r.map(\.ratio), ac = r.map(\.active)
+            print(String(format: "%-11@ n=%3d | align cost/frame p5 %.2f p50 %.2f p95 %.2f | phrase÷movement distance p5 %.2f p50 %.2f p95 %.2f | active s p5 %.2f p50 %.2f",
+                         kind, r.count, q(pf, 0.05), q(pf, 0.5), q(pf, 0.95), q(ra, 0.05), q(ra, 0.5), q(ra, 0.95), q(ac, 0.05), q(ac, 0.5)))
+        }
+        // Rules: accept only if align cost/frame < P AND phrase÷movement < R AND active ≥ A.
+        let sent = rows.filter { $0.kind == "sentence" }, neg = rows.filter { $0.kind != "sentence" }
+        var results: [(Int, Int, Int, String)] = []
+        for p in [0.9, 1.0, 1.1, 1.2, 1.4] { for r in [1.2, 1.4, 1.6, 2.0, 99] { for a in [0.0, 0.6, 0.8, 0.9] {
+            let ok = { (x: (kind: String, perFrame: Double, ratio: Double, active: Double)) in x.perFrame < p && x.ratio < r && x.active >= a }
+            let keep = sent.filter(ok).count
+            let mv = neg.filter { $0.kind == "movement" && ok($0) }.count, sw = neg.filter { $0.kind == "single word" && ok($0) }.count
+            results.append((keep, mv, sw, String(format: "cost/frame < %.1f, ratio < %@, active ≥ %.1f s", p, r == 99 ? "∞" : String(format: "%.1f", r), a)))
+        } } }
+        let mvTotal = neg.filter { $0.kind == "movement" }.count, swTotal = neg.filter { $0.kind == "single word" }.count
+        // One combined score: log(cost/frame ÷ 0.5) + log(phrase÷nothing distance). Lower = more sentence-like.
+        func z(_ x: (kind: String, perFrame: Double, ratio: Double, active: Double)) -> Double {
+            x.perFrame.isFinite && x.ratio.isFinite ? log(x.perFrame / 0.5) + log(x.ratio) : 99
+        }
+        let sz = sent.map(z).sorted()
+        print(String(format: "combined score: sentences max %.2f (p90 %.2f) · movement min %.2f · single words min %.2f",
+                     sz.last ?? 0, sz[Int(Double(sz.count) * 0.9)], neg.filter { $0.kind == "movement" }.map(z).min() ?? 0,
+                     neg.filter { $0.kind == "single word" }.map(z).min() ?? 0))
+        for t in [0.0, 0.2, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0] {
+            let keep = sent.filter { z($0) < t }.count
+            let mv = neg.filter { $0.kind == "movement" && z($0) < t }.count, sw = neg.filter { $0.kind == "single word" && z($0) < t }.count
+            print(String(format: "score < %.1f → sentences kept %2d/%d · movement accepted %2d/%d · single words accepted %3d/%d",
+                         t, keep, sent.count, mv, mvTotal, sw, swTotal))
+        }
+        exit(0)
+    }
+
+    // --demo: the two-sentence choice on real sentence takes, held-out by block (D46).
+    if args.contains("--demo") {
+        let phrases = ContextModel().tokenized
+        let sentences = dataset.sentenceTakes.filter { t in phrases.contains(t.label.split(separator: " ").map(String.init)) }
+        print("\(sentences.count) real sentence takes: " + phrases.map { p in "\(sentences.filter { $0.label == p.joined(separator: " ") }.count)× \"\(p.joined(separator: " "))\"" }.joined(separator: ", "))
+        var confusion = [[Int]](repeating: [0, 0], count: 2)
+        var trieConf = confusion
+        var combos: [Double: [[Int]]] = [0.5: confusion, 1: confusion, 2: confusion]
+        var sentOnly = confusion
+        var comboMargins: [(Double, Bool)] = []
+        var margins: [(Double, Bool)] = []
+        var durations: [(Double, Int)] = []
+        for block in Set(sentences.map(\.block)).sorted() {
+            // Hold out the sentence block AND the word takes cut from it.
+            guard let clf = Classifier(training: TrainingSet.build(train.filter { $0.block != block }, config: .defaults)),
+                  let dec = SentenceDecoder(classifier: clf, pipeline: .defaults) else { continue }
+            var free = SentenceConfig(); free.onlyExpectedPhrases = false
+            let trie = SentenceDecoder(classifier: clf, pipeline: .defaults, config: free)!
+            var ctx = ContextModel(); ctx.strength = .strong
+            for t in sentences where t.block == block {
+                let truth = phrases.firstIndex(of: t.label.split(separator: " ").map(String.init))!
+                guard let f = dec.features(t.samples), let pick = dec.choose(f.seq, among: phrases) else { continue }
+                confusion[truth][pick.index] += 1
+                margins.append((pick.margin, pick.index == truth))
+                durations.append((Double(f.seq.count) / 25, truth))
+                // Whole-sentence references: recorded sentences from other blocks.
+                let refs: [[FeatureSequence]] = phrases.map { p in
+                    sentences.filter { $0.block != block && $0.label == p.joined(separator: " ") }.compactMap { dec.features($0.samples)?.seq }
+                }
+                let sd = SentenceDecoder.sentenceDistances(f.seq, references: refs)
+                sentOnly[truth][sd[0] <= sd[1] ? 0 : 1] += 1
+                for w in combos.keys {
+                    if let c = dec.chooseCombined(f.seq, among: phrases, references: refs, sentenceWeight: w) {
+                        combos[w]![truth][c.index] += 1
+                        if w == 1 { comboMargins.append((c.margin, c.index == truth)) }
+                    }
+                }
+                let heard = trie.decodeSentence(t.samples, context: ctx)?.words.map(\.label) ?? []
+                trieConf[truth][phrases.firstIndex(of: heard) ?? (1 - truth)] += 1
+            }
+        }
+        func show(_ name: String, _ c: [[Int]]) {
+            let right = c[0][0] + c[1][1], n = c.flatMap { $0 }.reduce(0, +)
+            print("\(name): \(right)/\(n) right · sentence 1 → [\(c[0][0]) right, \(c[0][1]) wrong] · sentence 2 → [\(c[1][1]) right, \(c[1][0]) wrong]")
+        }
+        show("choose by alignment", confusion)
+        show("whole-phrase decoder", trieConf)
+        show("whole-sentence matching only", sentOnly)
+        for w in combos.keys.sorted() { show(String(format: "combined (sentence weight %.1f)", w), combos[w]!) }
+        let cw = comboMargins.filter { !$0.1 }.map(\.0), cr = comboMargins.filter(\.1).map(\.0).sorted()
+        print(String(format: "combined margin: right min %.2f median %.2f, wrong max %@", cr.first ?? 0, cr.isEmpty ? 0 : cr[cr.count / 2],
+                     cw.isEmpty ? "none" : String(format: "%.2f", cw.max()!)))
+        let wrong = margins.filter { !$0.1 }.map(\.0), rightM = margins.filter(\.1).map(\.0).sorted()
+        print(String(format: "margin: right median %.2f (min %.2f), wrong max %.2f", rightM.isEmpty ? 0 : rightM[rightM.count / 2], rightM.first ?? 0, wrong.max() ?? 0))
+        for k in 0..<2 {
+            let ds = durations.filter { $0.1 == k }.map(\.0).sorted()
+            if !ds.isEmpty { print(String(format: "active duration, sentence %d: min %.2f s, median %.2f s, max %.2f s", k + 1, ds.first!, ds[ds.count / 2], ds.last!)) }
+        }
+        exit(0)
+    }
+
+    // --real-sentences: decode every recorded sentence take with a model that never saw its block (D45).
+    if args.contains("--real-sentences") {
+        let sentences = dataset.sentenceTakes
+        print("\(sentences.count) recorded sentence takes in \(Set(sentences.map(\.block)).count) blocks")
+        let fullPhrase = "hello can you hear me"
+        // Demo mode stand-in: choose the full phrase against all of its own parts as decoys.
+        do {
+            let full = fullPhrase.split(separator: " ").map(String.init)
+            var decoys: [[String]] = []
+            for len in 2..<full.count { for st in 0...(full.count - len) { decoys.append(Array(full[st..<(st + len)])) } }
+            var right = 0, n = 0
+            var margins: [Double] = []
+            for block in Set(sentences.map(\.block)).sorted() {
+                guard let clf = Classifier(training: TrainingSet.build(train.filter { $0.block != block }, config: .defaults)),
+                      let dec = SentenceDecoder(classifier: clf, pipeline: .defaults) else { continue }
+                for t in sentences where t.block == block {
+                    guard let f = dec.features(t.samples), let pick = dec.choose(f.seq, among: [full] + decoys) else { continue }
+                    n += 1; if pick.index == 0 { right += 1 }
+                    margins.append(pick.margin)
+                }
+            }
+            margins.sort()
+            print(String(format: "demo choice, full phrase vs %d of its parts: %d/%d right, margin median %.2f", decoys.count, right, n,
+                         margins.isEmpty ? 0 : margins[margins.count / 2]))
+        }
+        // Realistic stand-in for the second demo sentence: 7-word sequences of trained words in another order.
+        do {
+            let full = fullPhrase.split(separator: " ").map(String.init)
+            var rng = SeededRNG(seed: 9)
+            var choiceRight = 0, trieRight = 0, n = 0
+            for block in Set(sentences.map(\.block)).sorted() {
+                guard let clf = Classifier(training: TrainingSet.build(train.filter { $0.block != block }, config: .defaults)) else { continue }
+                var free = SentenceConfig(); free.onlyExpectedPhrases = false
+                guard let choiceDec = SentenceDecoder(classifier: clf, pipeline: .defaults),
+                      let trieDec = SentenceDecoder(classifier: clf, pipeline: .defaults, config: free) else { continue }
+                for t in sentences where t.block == block {
+                    let other = (0..<7).map { i in [["you", "me", "hello"], ["hear", "can"]][i % 2].randomElement(using: &rng)! }
+                    var ctx = ContextModel(); ctx.strength = .strong; ctx.phrases = [fullPhrase, other.joined(separator: " ")]
+                    n += 1
+                    if let f = choiceDec.features(t.samples), let pick = choiceDec.choose(f.seq, among: [full, other]), pick.index == 0 { choiceRight += 1 }
+                    if trieDec.decodeSentence(t.samples, context: ctx)?.words.map(\.label) == full { trieRight += 1 }
+                }
+            }
+            print("two-sentence demo stand-in (your sentence vs a 7-word decoy): choose-by-alignment \(choiceRight)/\(n), whole-phrase decoder \(trieRight)/\(n)")
+        }
+        var mode = SentenceConfig(); mode.onlyExpectedPhrases = false
+        for (name, include) in [("whole phrases only", false), ("phrases + parts", true)] {
+            var ctx = ContextModel(); ctx.strength = .strong; ctx.includeParts = include; ctx.phrases = [fullPhrase]
+            var acc = 0.0, exact = 0, n = 0, fullExact = 0, fullN = 0, partExact = 0, partN = 0
+            var misses: [String] = []
+            for block in Set(sentences.map(\.block)).sorted() {
+                let trainRaw = train.filter { $0.block != block }
+                guard let clf = Classifier(training: TrainingSet.build(trainRaw, config: .defaults)),
+                      let dec = SentenceDecoder(classifier: clf, pipeline: .defaults, config: mode) else { continue }
+                for t in sentences where t.block == block {
+                    let said = t.label.split(separator: " ").map(String.init)
+                    let heard = dec.decode(t.samples, context: ctx)?.words.map(\.label) ?? []
+                    acc += SentenceScore.wordAccuracy(said: said, heard: heard); n += 1
+                    let ok = heard == said
+                    if ok { exact += 1 } else if misses.count < 8 { misses.append("\(t.label) → \(heard.joined(separator: " "))") }
+                    if t.label == fullPhrase { fullN += 1; if ok { fullExact += 1 } } else { partN += 1; if ok { partExact += 1 } }
+                }
+            }
+            print(String(format: "%@: words %.0f%%, whole sentence %d/%d · full phrase %d/%d · parts %d/%d",
+                         name, acc / Double(max(n, 1)) * 100, exact, n, fullExact, fullN, partExact, partN))
+            for m in misses.prefix(6) { print("   miss: \(m)") }
+        }
+        exit(0)
+    }
+
     if args.contains("--lengths") {
         // How long each trained word is after trimming (the sentence decoder needs segments ≥ 0.5× a template).
         var by: [String: [Double]] = [:]
@@ -196,9 +393,31 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
         let phrase = ContextModel().tokenized.first ?? []
         var parts: [[String]] = []
         for len in 2...phrase.count { for st in 0...(phrase.count - len) { parts.append(Array(phrase[st..<(st + len)])) } }
-        for (pw, penalty) in [(0.0, 0.0), (1.0, 0.0), (0.2, 0.0), (0.2, -1.5), (0.1, -1.5), (0.2, -3.0), (0.05, -3.0)] {
+        if args.contains("--tempo") {
+            for (dw, tw) in [(5.0, 8.0), (5.0, 20.0), (10.0, 20.0), (3.0, 20.0)] {
+                for err in [1.0, 1.3, 0.77] {
+                    var ctx = ContextModel(); ctx.strength = .strong; ctx.includeParts = true
+                    var cells: [String] = []
+                    for (name, sentences) in [("full", [phrase]), ("parts", parts)] {
+                        for speed in [1.0, 2.0] {
+                            var sc = SentenceConfig(); sc.durationWeight = dw; sc.tempoPriorWeight = tw
+                            sc.expectedTempo = err / speed           // the pace sentence training would measure (± error)
+                            if let b = Tuner.sentenceBenchmark(train, phrase: phrase, config: .defaults, sentence: sc, context: ctx, speed: speed, perBlock: 8, sentences: sentences) {
+                                cells.append(String(format: "%@ ×%.0f %3.0f%%/%3.0f%%", name, speed, b.wordAccuracy * 100, b.exact * 100))
+                            }
+                        }
+                    }
+                    print(String(format: "duration %4.1f prior %4.1f, pace estimate off by ×%.2f | ", dw, tw, err) + cells.joined(separator: " | "))
+                }
+            }
+            exit(0)
+        }
+        let grid: [(Double, Double, Double)] = args.contains("--grid")
+            ? [(0, 0, 0), (1, 0, 0), (1, 0, 2), (1, 0, 5), (1, 0, 10), (0.5, 0, 5), (0.5, 0, 10), (1, 0, 20)]
+            : [(0, 0, 0), (1, 0, 0), (1, 0, 5)]
+        for (pw, penalty, dw) in grid {
             var ctx = ContextModel(); ctx.strength = .strong; ctx.includeParts = pw > 0; ctx.partWeight = pw
-            var sc = SentenceConfig(); sc.insertionPenalty = penalty
+            var sc = SentenceConfig(); sc.insertionPenalty = penalty; sc.durationWeight = dw
             var cells: [String] = []
             for (name, sentences) in [("full", [phrase]), ("parts", parts)] {
                 for speed in [1.0, 2.0] {
@@ -207,7 +426,7 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
                     }
                 }
             }
-            print(String(format: "part weight %.2f, word penalty %+.1f | ", pw, penalty) + cells.joined(separator: " | "))
+            print(String(format: "parts %.2f, tempo model %4.1f | ", pw, dw) + cells.joined(separator: " | "))
         }
         exit(0)
     }

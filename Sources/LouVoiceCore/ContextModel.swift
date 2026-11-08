@@ -6,7 +6,8 @@ import Foundation
 /// (smoothing keeps every word possible).
 public struct ContextModel: Codable, Hashable, Sendable {
     /// Expected phrases, one per entry, words separated by spaces.
-    public var phrases: [String] = ["hello can you hear me"]
+    /// The two demo sentences (D45).
+    public var phrases: [String] = ["hello can you hear me", "my name is konrad how are you today"]
     /// How much the prior counts against the motion evidence (0 = off). Default = Strong (D38).
     public var weight: Double = 0.5
     /// Softness of the motion likelihood: smaller trusts the DTW ranking more.
@@ -14,11 +15,12 @@ public struct ContextModel: Codable, Hashable, Sendable {
     /// Add-α smoothing so out-of-order words stay possible.
     public var smoothing: Double = 0.1
     /// Also expect any contiguous part of each phrase ("hello can", "you hear me"), in order (D44).
-    public var includeParts: Bool = true
+    /// Off by default: on stitched data it helps parts (8% → 38% whole) but hurts the full phrase.
+    public var includeParts: Bool = false
     /// Shortest part that counts as a phrase of its own.
     public var minPartWords: Int = 2
     /// How much a part counts relative to a full phrase (D44).
-    public var partWeight: Double = 1
+    public var partWeight: Double = 0.5
     public init() {}
 
     enum CodingKeys: String, CodingKey { case phrases, weight, temperature, smoothing, includeParts, minPartWords, partWeight }
