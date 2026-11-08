@@ -22,7 +22,7 @@ export function WaitlistForm({ dark = false, autoFocus = false }: { dark?: boole
 
   if (done)
     return (
-      <p role="status" className={`flex items-center gap-3 text-[18px] font-semibold ${dark ? 'text-pearl' : 'text-ink'}`}>
+      <p role="status" className={`flex items-center gap-3 text-[17px] sm:text-[18px] font-semibold ${dark ? 'text-pearl' : 'text-ink'}`}>
         <LogoMark className={`h-7 w-auto ${dark ? 'text-portage' : 'text-[#3d1689]'}`} /> You’re on the list. We’ll email you.
       </p>
     )
@@ -40,7 +40,7 @@ export function WaitlistForm({ dark = false, autoFocus = false }: { dark?: boole
           placeholder="you@email.com"
           value={email}
           onChange={(e) => { setEmail(e.target.value); setError(false) }}
-          className={`h-16 min-w-0 flex-1 rounded-lg border px-5 text-[18px] outline-none transition focus:ring-2 ${
+          className={`h-14 w-full min-w-0 rounded-lg border px-5 text-[17px] sm:h-16 sm:flex-1 sm:text-[18px] outline-none transition focus:ring-2 ${
             dark
               ? 'border-pearl/60 bg-ink/40 text-pearl placeholder:text-pearl/50 focus:border-pearl focus:ring-portage/50'
               : 'border-ink bg-pearl text-ink placeholder:text-ink/40 focus:border-[#3d1689] focus:ring-[#3d1689]/30'
@@ -48,7 +48,7 @@ export function WaitlistForm({ dark = false, autoFocus = false }: { dark?: boole
         />
         <button
           type="submit"
-          className={`inline-flex h-16 shrink-0 items-center justify-center gap-3 rounded-lg px-8 text-[18px] font-semibold transition active:translate-y-px ${
+          className={`inline-flex h-14 w-full shrink-0 items-center justify-center gap-3 rounded-lg px-8 text-[17px] sm:h-16 sm:w-auto sm:text-[18px] font-semibold transition active:translate-y-px ${
             dark ? 'bg-pearl text-ink hover:bg-portage' : 'bg-ink text-pearl shadow-[5px_5px_0_#682bd7] hover:bg-[#3d1689]'
           }`}
         >
@@ -78,9 +78,9 @@ export function WaitlistPopup() {
     <dialog
       ref={ref}
       onClick={(e) => e.target === ref.current && ref.current?.close()}
-      className="paper m-auto w-[min(92vw,560px)] rounded-xl border border-ink p-0 text-ink shadow-[8px_8px_0_#3d1689] backdrop:bg-ink/60"
+      className="paper m-auto w-[min(calc(100vw-2.5rem),560px)] rounded-xl border border-ink p-0 text-ink shadow-[5px_5px_0_#3d1689] backdrop:bg-ink/60 sm:shadow-[8px_8px_0_#3d1689]"
     >
-      <div className="relative flex flex-col gap-6 p-8 sm:p-10">
+      <div className="relative flex flex-col gap-5 p-6 pt-8 sm:gap-6 sm:p-10">
         <button
           onClick={() => ref.current?.close()}
           aria-label="Close"
@@ -88,7 +88,7 @@ export function WaitlistPopup() {
         >
           <X className="size-5" />
         </button>
-        <h2 className="display text-[clamp(40px,6vw,56px)]">Get early access.</h2>
+        <h2 className="display pr-10 text-[clamp(38px,6vw,56px)]">Get early access.</h2>
         <WaitlistForm key={key} autoFocus />
       </div>
     </dialog>

@@ -10,7 +10,7 @@ export default function Purpose() {
         art={<FaceFX src="/face-source.png" settings={DEFAULT_FACE} className="absolute top-[8%] left-[6%] w-[min(26vw,440px)]" />}
       />
 
-      <section className={`grid gap-12 py-20 lg:grid-cols-2 lg:py-28 ${WRAP}`}>
+      <section className={`grid gap-10 py-14 sm:gap-12 sm:py-20 lg:grid-cols-2 lg:py-28 ${WRAP}`}>
         <Quote cite="Beukelman, Fager & Nordness, Neurology Research International, 2011">
           80 to 95% of people with ALS eventually can’t meet their daily communication needs with natural speech.
         </Quote>
@@ -52,7 +52,7 @@ export default function Purpose() {
       </Section>
 
       <Section title="What experts told us">
-        <div className="grid gap-12 py-10 lg:grid-cols-2">
+        <div className="grid gap-10 py-8 sm:gap-12 sm:py-10 lg:grid-cols-2">
           <Quote cite="ALS Canada representatives, on the concept">“Absolutely fantastic.” “Incredibly thoughtful.”</Quote>
           <Quote cite="ALS Canada representatives, on deterioration tracking">
             Recalibrating over time produces a curve of how the disease is progressing.

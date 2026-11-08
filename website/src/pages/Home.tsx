@@ -47,17 +47,17 @@ function Hero({ face, signal }: { face: FaceSettings; signal: SignalSettings }) 
       </div>
 
       {/* ——— copy ——— */}
-      <div className="relative z-10 mx-auto max-w-[1680px] px-5 pt-14 pb-10 sm:px-8 lg:min-h-[1020px] lg:pt-28 xl:w-[calc(100%-4rem)] xl:px-0">
-        <h1 className="display text-[clamp(48px,6.2vw,100px)]">
+      <div className="relative z-10 mx-auto max-w-[1680px] px-5 pt-10 pb-10 sm:px-8 sm:pt-14 lg:min-h-[1020px] lg:pt-28 xl:w-[calc(100%-4rem)] xl:px-0">
+        <h1 className="display text-[clamp(44px,6.2vw,100px)]">
           <span className="block">Mouth a word.</span>
           <span className="block">Your voice speaks.</span>
         </h1>
-        <p className="mt-10 max-w-[34rem] text-[19px] leading-[1.65] text-ink/85 sm:text-[21px]">
+        <p className="mt-8 max-w-[34rem] text-[18px] leading-[1.6] text-ink/85 sm:mt-10 sm:text-[21px] sm:leading-[1.65]">
           LouVoice feels your jaw muscles move through your AirPods and turns each silent word into text, spoken in your
           own voice. No camera, no microphone. Built for people with ALS.
         </p>
-        <div className="mt-12 flex flex-wrap items-center gap-6">
-          <Button onClick={openWaitlist} className="h-16 gap-3 bg-ink px-8 text-[18px] font-semibold text-pearl shadow-[5px_5px_0_#682bd7] hover:bg-[#3d1689]">
+        <div className="mt-10 flex flex-col items-start gap-7 sm:mt-12 sm:flex-row sm:flex-wrap sm:items-center sm:gap-6">
+          <Button onClick={openWaitlist} className="h-14 w-full gap-3 bg-ink px-8 text-[17px] sm:h-16 sm:w-auto sm:text-[18px] font-semibold text-pearl shadow-[5px_5px_0_#682bd7] hover:bg-[#3d1689]">
             Join the waitlist <ArrowRight className="size-5" />
           </Button>
           <Link to="/#how" className="hatch-underline text-[17px] font-semibold">
@@ -66,12 +66,12 @@ function Hero({ face, signal }: { face: FaceSettings; signal: SignalSettings }) 
         </div>
 
         {/* mobile art */}
-        <div className="relative mt-14 lg:hidden">
+        <div className="relative mt-12 sm:mt-14 lg:hidden">
           <div className="absolute inset-x-0 top-0 h-1/2 overflow-hidden">
             <SignalDither settings={signal} />
           </div>
-          <FaceFX src="/face-source.png" settings={face} className="mx-auto mt-10 max-w-[380px]" />
-          <Badge className="absolute right-0 -bottom-6 size-[110px] [&_b]:text-[38px]" />
+          <FaceFX src="/face-source.png" settings={face} className="mx-auto mt-10 max-w-[min(380px,88%)]" />
+          <Badge className="absolute right-0 -bottom-6 size-[100px] sm:size-[110px] [&_b]:text-[34px] sm:[&_b]:text-[38px]" />
         </div>
       </div>
     </section>
@@ -82,10 +82,10 @@ const WORDS = ['I love you', 'How was your day', 'Water', 'Yes', 'No', 'Thank yo
 
 function Marquee() {
   return (
-    <div className="overflow-hidden border-y border-ink bg-ink py-5 text-pearl">
-      <div className="marquee flex w-max gap-12 whitespace-nowrap">
+    <div className="overflow-hidden border-y border-ink bg-ink py-4 text-pearl sm:py-5">
+      <div className="marquee flex w-max gap-8 whitespace-nowrap sm:gap-12">
         {[...WORDS, ...WORDS].map((l, i) => (
-          <span key={i} className="display flex items-center gap-12 text-[34px] leading-none">
+          <span key={i} className="display flex items-center gap-8 text-[28px] leading-none sm:gap-12 sm:text-[34px]">
             {l} <span className="size-2 rounded-full bg-portage" />
           </span>
         ))}
@@ -117,22 +117,22 @@ const STEPS = [
 
 function HowItWorks() {
   return (
-    <section id="how" className="mx-auto max-w-[1680px] px-5 py-24 sm:px-8 lg:py-32 xl:w-[calc(100%-4rem)] xl:px-0">
-      <div className="flex flex-wrap items-end justify-between gap-6 border-b border-ink pb-8">
-        <h2 className="display max-w-[14ch] text-[clamp(48px,6.4vw,96px)]">From muscle to voice</h2>
-        <p className="max-w-md text-[18px] leading-relaxed text-ink/75">
+    <section id="how" className="mx-auto max-w-[1680px] scroll-mt-4 px-5 py-16 sm:px-8 sm:py-24 lg:py-32 xl:w-[calc(100%-4rem)] xl:px-0">
+      <div className="flex flex-wrap items-end justify-between gap-4 border-b border-ink pb-6 sm:gap-6 sm:pb-8">
+        <h2 className="display max-w-[14ch] text-[clamp(42px,6.4vw,96px)]">From muscle to voice</h2>
+        <p className="max-w-md text-[17px] leading-relaxed text-ink/75 sm:text-[18px]">
           Three steps, AirPods Pro and a Mac. No special medical hardware.
         </p>
       </div>
       <div className="grid gap-px bg-ink md:grid-cols-3">
         {STEPS.map(({ n, title, body, Graphic }) => (
           <article key={n} className="paper flex flex-col">
-            <div className="relative h-56 overflow-hidden border-b border-ink">
+            <div className="relative h-52 overflow-hidden border-b border-ink sm:h-56">
               <Graphic />
               <span className="absolute top-4 left-4 bg-pearl px-2 py-1 font-mono text-[13px]">{n}</span>
             </div>
-            <div className="flex flex-1 flex-col gap-4 p-8">
-              <h3 className="display text-[44px]">{title}</h3>
+            <div className="flex flex-1 flex-col gap-3 py-7 sm:gap-4 sm:p-8">
+              <h3 className="display text-[38px] sm:text-[44px]">{title}</h3>
               <p className="text-[17px] leading-relaxed text-ink/75">{body}</p>
             </div>
           </article>
@@ -152,9 +152,9 @@ function Stats() {
   return (
     <section id="stats" className="mx-auto grid max-w-[1680px] grid-cols-2 border-y border-ink lg:grid-cols-4 xl:w-[calc(100%-4rem)]">
       {stats.map(([v, l], i) => (
-        <div key={v} className={`border-ink p-6 sm:p-10 ${i % 2 ? '' : 'border-r'} ${i < 2 ? 'border-b lg:border-b-0' : ''} lg:border-r lg:last:border-r-0`}>
-          <div className="display text-[clamp(44px,5vw,80px)] text-[#3d1689]" style={{ fontWeight: 800 }}>{v}</div>
-          <div className="mt-3 max-w-[24ch] text-[15px] font-semibold text-[#3d1689]">{l}</div>
+        <div key={v} className={`border-ink px-5 py-6 sm:p-10 ${i % 2 ? '' : 'border-r'} ${i < 2 ? 'border-b lg:border-b-0' : ''} lg:border-r lg:last:border-r-0`}>
+          <div className="display text-[clamp(40px,5vw,80px)] text-[#3d1689]" style={{ fontWeight: 800 }}>{v}</div>
+          <div className="mt-3 max-w-[24ch] text-[14px] font-semibold sm:text-[15px] text-[#3d1689]">{l}</div>
         </div>
       ))}
     </section>
@@ -168,7 +168,7 @@ export default function Home() {
       <Marquee />
       <HowItWorks />
       <Stats />
-      <div className="h-24" />
+      <div className="h-16 sm:h-24" />
     </>
   )
 }
