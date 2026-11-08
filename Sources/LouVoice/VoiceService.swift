@@ -2,142 +2,194 @@ import AVFoundation
 import Foundation
 import LouVoiceCore
 import Observation
-import Security
+import os
 
 /// Speaks decoded words in the user's ElevenLabs voice clone (PRD item 1, D39).
 ///
-/// The vocabulary is fixed, so every word/phrase is synthesized once and cached on disk. Playback
-/// is then instant and works without Wi-Fi. Words added since the last cache are fetched live
-/// (and cached). Without a key or voice, it falls back to the system voice so decode still talks.
+/// Every vocabulary word is synthesized once and cached on disk (VoiceCache), so playback is
+/// instant and works offline. Uncached words are fetched live, cached, then played. If that fetch
+/// fails (offline, bad key, server error) the word is shown on screen without audio; nothing here
+/// throws or crashes on network errors.
 @MainActor @Observable
 final class VoiceService {
-    enum Source: String { case cache = "your voice (cached)", live = "your voice (live)", system = "system voice" }
+    enum Source: String {
+        case cache = "your voice (cached)"
+        case live = "your voice (live)"
+        case textOnly = "text only (no audio)"
+        case system = "system voice"
+    }
 
     struct Settings: Codable, Equatable {
         var enabled = true
-        var voiceID = ""
-        // TODO(team): confirm the model. Flash v2.5 is ElevenLabs' low-latency model; cached audio
-        // could use a higher-quality model since speed doesn't matter at cache time.
-        var modelID = "eleven_flash_v2_5"
-        var outputFormat = "mp3_44100_128"
+        var modelID = VoiceCache.defaultModelID
+        var outputFormat = VoiceCache.defaultOutputFormat
     }
 
-    var settings: Settings { didSet { save() } }
+    var settings: Settings { didSet { saveSettings() } }
+    /// The ElevenLabs voice clone ID (UserDefaults; not secret).
+    var voiceID: String { didSet { saveVoiceID() } }
     private(set) var cachedWords: Set<String> = []
     private(set) var isPreparing = false
     private(set) var prepareProgress = 0.0
     private(set) var status = ""
     private(set) var lastError: String?
+    /// speak() call → playback start, milliseconds, for the most recent spoken word.
+    private(set) var lastLatencyMs: Double?
+    /// Set when a word couldn't be voiced; the UI shows it as text.
+    private(set) var lastTextOnly: String?
 
     @ObservationIgnored private var player: AVAudioPlayer?
     @ObservationIgnored private var sequencePlayer: AVQueuePlayer?
     @ObservationIgnored private let fallback = AVSpeechSynthesizer()
-    static let keychainService = "LouVoice.ElevenLabs"
-    static let settingsKey = "voiceSettings.v1"
+    @ObservationIgnored private let log = Logger(subsystem: "LouVoice", category: "voice")
+    static let settingsKey = "voiceSettings.v2"
+    static let voiceIDKey = "elevenLabsVoiceID"
+
+    private var isolated: Bool { ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] != nil }
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
+        let isolated = ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] != nil
+        if !isolated, let data = UserDefaults.standard.data(forKey: Self.settingsKey),
            let s = try? JSONDecoder().decode(Settings.self, from: data) { settings = s } else { settings = Settings() }
+        voiceID = isolated ? "" : (UserDefaults.standard.string(forKey: Self.voiceIDKey) ?? "")
     }
 
-    // MARK: Key (Keychain or ELEVENLABS_API_KEY; never in the bundle or the repo)
+    // MARK: Key (Keychain, or ELEVENLABS_API_KEY for development; never in the bundle or the repo)
 
-    var apiKey: String? {
+    private var apiKey: String? {
         if let env = ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"], !env.isEmpty { return env }
-        return Keychain.read(service: Self.keychainService, account: "api-key")
+        return KeychainStore.read()
     }
     var hasKey: Bool { apiKey != nil }
-    var isConfigured: Bool { hasKey && !settings.voiceID.trimmingCharacters(in: .whitespaces).isEmpty }
+    var isConfigured: Bool { hasKey && !VoiceCache.sanitizedVoiceID(voiceID).isEmpty }
 
     func setAPIKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        Keychain.write(trimmed.isEmpty ? nil : trimmed, service: Self.keychainService, account: "api-key")
-        status = trimmed.isEmpty ? "API key removed" : "API key saved in Keychain"
+        guard !trimmed.isEmpty else { return }
+        status = KeychainStore.save(trimmed) ? "API key saved in Keychain" : "Couldn't save the API key to the Keychain"
+    }
+
+    func removeAPIKey() {
+        KeychainStore.delete()
+        status = "API key removed"
     }
 
     // MARK: Cache
 
-    private var cacheDirectory: URL {
-        let dir = DatasetStore.directory.appending(path: "voice/\(Self.safe(settings.voiceID))", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    /// <data dir>/VoiceCache — ~/Library/Application Support/LouVoice/VoiceCache unless LOUVOICE_DATA_DIR is set.
+    private var cacheRoot: URL { DatasetStore.directory.appending(path: "VoiceCache", directoryHint: .isDirectory) }
+
+    private func cacheURL(_ text: String) -> URL? {
+        VoiceCache.cacheURL(text: text, voiceID: voiceID, modelID: settings.modelID, root: cacheRoot)
     }
 
-    private func cacheURL(_ text: String) -> URL {
-        let key = "\(settings.modelID)|\(settings.outputFormat)|\(text.lowercased())"
-        return cacheDirectory.appending(path: String(stableHash(key), radix: 16) + ".mp3")
+    private func isCached(_ text: String) -> Bool {
+        guard let url = cacheURL(text) else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     func refreshCache(words: [String]) {
-        cachedWords = Set(words.filter { FileManager.default.fileExists(atPath: cacheURL($0).path) })
+        cachedWords = Set(words.filter(isCached))
     }
 
-    /// Synthesize every word not yet cached (run after enrollment and when the vocabulary changes).
-    func prepare(words: [String]) async {
-        guard isConfigured, !isPreparing else { return }
-        let missing = words.filter { !FileManager.default.fileExists(atPath: cacheURL($0).path) }
-        guard !missing.isEmpty else { refreshCache(words: words); status = "All \(words.count) words cached"; return }
+    /// Synthesizes every word/phrase not already cached, with progress. Cached ones are skipped.
+    func prepare(vocabulary: [String]) async {
+        guard isConfigured, !isPreparing else {
+            if !isConfigured { status = "Add an API key and voice ID first" }
+            return
+        }
+        var seen = Set<String>()
+        let unique = vocabulary.filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
+        let missing = unique.filter { !isCached($0) }
+        guard !missing.isEmpty else {
+            refreshCache(words: unique)
+            status = "All \(unique.count) words already cached"
+            return
+        }
         isPreparing = true
         prepareProgress = 0
         lastError = nil
+        var failed = 0
         for (i, word) in missing.enumerated() {
-            status = "Generating \"\(word)\"…"
-            do { _ = try await synthesize(word) } catch { lastError = "\(word): \(error.localizedDescription)"; break }
+            status = "Generating \"\(word)\" (\(i + 1) of \(missing.count))…"
+            if await fetch(word) == nil { failed += 1 }
             prepareProgress = Double(i + 1) / Double(missing.count)
+            // Stop early if the first few all fail: likely offline or a bad key.
+            if failed >= 3, failed == i + 1 { break }
         }
         isPreparing = false
-        refreshCache(words: words)
-        status = lastError == nil ? "Cached \(cachedWords.count) of \(words.count) words" : "Stopped: \(lastError!)"
+        refreshCache(words: unique)
+        status = failed == 0
+            ? "Cached \(cachedWords.count) of \(unique.count) words"
+            : "Cached \(cachedWords.count) of \(unique.count) words; \(failed) failed (\(lastError ?? "unknown error"))"
     }
 
+    /// Existing callers (AppModel, Enrollment) use this name.
+    func prepare(words: [String]) async { await prepare(vocabulary: words) }
+
     func clearCache() {
-        try? FileManager.default.removeItem(at: cacheDirectory)
+        if let dir = cacheURL("x")?.deletingLastPathComponent() { try? FileManager.default.removeItem(at: dir) }
         cachedWords = []
         status = "Cache cleared"
     }
 
     // MARK: Speak
 
-    /// Plays `text` and returns how it was produced plus the seconds until playback started.
+    /// Plays `text` from the cache instantly; if uncached, fetches, caches, then plays. If that
+    /// fails, the text is shown without audio. Returns how it was voiced and seconds to playback.
     @discardableResult
     func speak(_ text: String) async -> (source: Source, seconds: Double) {
         let start = Date()
-        if settings.enabled, isConfigured {
-            let url = cacheURL(text)
-            var source = Source.cache
-            if !FileManager.default.fileExists(atPath: url.path) {
-                source = .live
-                do { _ = try await synthesize(text); cachedWords.insert(text) } catch {
-                    lastError = error.localizedDescription
-                    return speakSystem(text, start)
-                }
-            }
-            if play(url) { return (source, Date().timeIntervalSince(start)) }
+        lastTextOnly = nil
+        guard settings.enabled else { return finish(text, .textOnly, start, played: false) }
+        // TODO(team): with no key/voice set up at all, the system voice keeps decode audible for
+        // demos. Once set up, a failed fetch shows text only (team decision, 2026-11-07).
+        guard isConfigured else { return speakSystem(text, start) }
+        var source = Source.cache
+        var url = cacheURL(text).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        if url == nil {
+            source = .live
+            url = await fetch(text)
+            if url != nil { cachedWords.insert(text) }
         }
-        return speakSystem(text, start)
+        guard let url, play(url) else { return finish(text, .textOnly, start, played: false) }
+        return finish(text, source, start, played: true)
     }
 
-    /// A sentence: the cached word clips back to back; falls back to speaking the whole text.
+    /// A sentence: the cached word clips back to back (fetching any missing ones). If any word
+    /// can't be voiced, the sentence is shown as text only.
     @discardableResult
     func speak(words: [String]) async -> (source: Source, seconds: Double) {
         let start = Date()
         let text = words.joined(separator: " ")
-        guard settings.enabled, isConfigured else { return speakSystem(text, start) }
+        lastTextOnly = nil
+        guard settings.enabled else { return finish(text, .textOnly, start, played: false) }
+        guard isConfigured else { return speakSystem(text, start) }
         var urls: [URL] = []
         var source = Source.cache
         for w in words {
-            let url = cacheURL(w)
-            if !FileManager.default.fileExists(atPath: url.path) {
-                source = .live
-                guard (try? await synthesize(w)) != nil else { return speakSystem(text, start) }
-                cachedWords.insert(w)
-            }
-            urls.append(url)
+            if let u = cacheURL(w), FileManager.default.fileExists(atPath: u.path) { urls.append(u); continue }
+            source = .live
+            guard let u = await fetch(w) else { return finish(text, .textOnly, start, played: false) }
+            cachedWords.insert(w)
+            urls.append(u)
         }
         let queue = AVQueuePlayer(items: urls.map { AVPlayerItem(url: $0) })
         queue.play()
         sequencePlayer = queue
-        return (source, Date().timeIntervalSince(start))
+        return finish(text, source, start, played: true)
+    }
+
+    private func finish(_ text: String, _ source: Source, _ start: Date, played: Bool) -> (source: Source, seconds: Double) {
+        let seconds = Date().timeIntervalSince(start)
+        if played {
+            lastLatencyMs = seconds * 1000
+            log.info("speak → playback \(Int((seconds * 1000).rounded()), privacy: .public) ms (\(source.rawValue, privacy: .public))")
+        } else {
+            lastTextOnly = text
+            log.info("speak → no audio after \(Int((seconds * 1000).rounded()), privacy: .public) ms; showing text only")
+        }
+        return (source, seconds)
     }
 
     private func speakSystem(_ text: String, _ start: Date) -> (source: Source, seconds: Double) {
@@ -145,7 +197,7 @@ final class VoiceService {
         let u = AVSpeechUtterance(string: text)
         u.rate = 0.45
         fallback.speak(u)
-        return (.system, Date().timeIntervalSince(start))
+        return finish(text, .system, start, played: true)
     }
 
     private func play(_ url: URL) -> Bool {
@@ -157,76 +209,50 @@ final class VoiceService {
             return true
         } catch {
             lastError = "Playback failed: \(error.localizedDescription)"
+            // A corrupt cache file would fail forever; remove it so the next call refetches.
+            try? FileManager.default.removeItem(at: url)
             return false
         }
     }
 
     // MARK: ElevenLabs API
 
-    enum VoiceError: LocalizedError {
-        case notConfigured, http(Int, String)
-        var errorDescription: String? {
-            switch self {
-            case .notConfigured: "Add an ElevenLabs API key and voice ID first."
-            case .http(let code, let body): "ElevenLabs returned \(code)\(body.isEmpty ? "" : ": \(body.prefix(160))")"
+    /// Sends the VoiceCache request and writes the MP3 into the cache. Returns nil on any failure
+    /// (recorded in `lastError`, without the key).
+    private func fetch(_ text: String) async -> URL? {
+        guard let key = apiKey, let url = cacheURL(text),
+              let request = VoiceCache.request(text: text, voiceID: voiceID, apiKey: key,
+                                               modelID: settings.modelID, outputFormat: settings.outputFormat) else {
+            lastError = "Add an ElevenLabs API key and voice ID first."
+            return nil
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200, !data.isEmpty else {
+                let body = String(data: data.prefix(300), encoding: .utf8) ?? ""
+                lastError = "ElevenLabs returned \(code)\(body.isEmpty ? "" : ": \(body.prefix(160))")"
+                return nil
             }
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch let e as URLError where [.notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost].contains(e.code) {
+            lastError = "Offline: \(e.localizedDescription)"
+            return nil
+        } catch {
+            lastError = error.localizedDescription
+            return nil
         }
     }
 
-    /// POST /v1/text-to-speech/{voice_id}; writes the audio into the cache and returns its URL.
-    private func synthesize(_ text: String) async throws -> URL {
-        guard let key = apiKey, isConfigured else { throw VoiceError.notConfigured }
-        var components = URLComponents(string: "https://api.elevenlabs.io/v1/text-to-speech/\(settings.voiceID)")!
-        components.queryItems = [URLQueryItem(name: "output_format", value: settings.outputFormat)]
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 20
-        request.setValue(key, forHTTPHeaderField: "xi-api-key")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["text": text, "model_id": settings.modelID])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200, !data.isEmpty else {
-            throw VoiceError.http(code, String(data: data, encoding: .utf8) ?? "")
-        }
-        let url = cacheURL(text)
-        try data.write(to: url, options: .atomic)
-        return url
-    }
-
-    private func save() {
-        guard ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] == nil,
-              let data = try? JSONEncoder().encode(settings) else { return }
+    private func saveSettings() {
+        guard !isolated, let data = try? JSONEncoder().encode(settings) else { return }
         UserDefaults.standard.set(data, forKey: Self.settingsKey)
     }
 
-    private static func safe(_ s: String) -> String {
-        let v = s.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        return v.isEmpty ? "no-voice" : v
-    }
-}
-
-/// Minimal generic-password Keychain access.
-enum Keychain {
-    static func read(service: String, account: String) -> String? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                    kSecAttrAccount as String: account, kSecReturnData as String: true,
-                                    kSecMatchLimit as String: kSecMatchLimitOne]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
-        let s = String(data: data, encoding: .utf8)
-        return (s?.isEmpty ?? true) ? nil : s
-    }
-
-    static func write(_ value: String?, service: String, account: String) {
-        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                   kSecAttrAccount as String: account]
-        SecItemDelete(base as CFDictionary)
-        guard let value, let data = value.data(using: .utf8) else { return }
-        var add = base
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-        SecItemAdd(add as CFDictionary, nil)
+    private func saveVoiceID() {
+        guard !isolated else { return }
+        UserDefaults.standard.set(voiceID, forKey: Self.voiceIDKey)
     }
 }

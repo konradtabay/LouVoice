@@ -59,7 +59,7 @@ struct DecodeView: View {
                                     : "The original mode: one word per press.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            VoiceSetupCard()
+            VoiceSettingsView()
             SectionCard(title: "Next-word prediction") {
                 Picker("Strength", selection: Binding(get: { model.config.context.strength },
                                                       set: { v in model.updateConfig { $0.context.strength = v } })) {
@@ -242,54 +242,6 @@ private struct FlowChips: View {
                 }
                 .buttonStyle(.plain)
             }
-        }
-    }
-}
-
-/// ElevenLabs voice setup (PRD item 1). The key goes to the Keychain, never to disk or the repo.
-private struct VoiceSetupCard: View {
-    @Environment(AppModel.self) private var model
-    @State private var keyField = ""
-
-    var body: some View {
-        let v = model.voice
-        SectionCard(title: "Your voice (ElevenLabs)") {
-            Toggle("Speak in my voice", isOn: Binding(get: { v.settings.enabled }, set: { v.settings.enabled = $0 }))
-            HStack {
-                SecureField(v.hasKey ? "API key saved ✓ (paste to replace)" : "ElevenLabs API key", text: $keyField)
-                Button("Save") { v.setAPIKey(keyField); keyField = ""; v.refreshCache(words: model.words) }
-                    .disabled(keyField.isEmpty)
-            }
-            TextField("Voice ID (from your ElevenLabs voice clone)", text: Binding(
-                get: { v.settings.voiceID },
-                set: { v.settings.voiceID = $0.trimmingCharacters(in: .whitespaces); v.refreshCache(words: model.words) }))
-            HStack {
-                Button(v.isPreparing ? "Generating…" : "Generate voice for all words") {
-                    Task { await v.prepare(words: model.words) }
-                }
-                .disabled(!v.isConfigured || v.isPreparing)
-                Button("Play test") { Task { await v.speak(model.words.first ?? "hello") } }
-            }
-            if v.isPreparing { ProgressView(value: v.prepareProgress) }
-            Text(v.isConfigured
-                 ? "Cached \(v.cachedWords.count) of \(model.words.count) words. Cached words play instantly, offline."
-                 : "Not set up yet: decoded words use the system voice until a key and voice ID are added.")
-                .font(.caption).foregroundStyle(.secondary)
-            if !v.status.isEmpty { Text(v.status).font(.caption).foregroundStyle(.secondary) }
-            if let e = v.lastError { Text(e).font(.caption).foregroundStyle(.red) }
-            delayStats
-        }
-    }
-
-    @ViewBuilder private var delayStats: some View {
-        let delays = model.decoder.results.compactMap(\.voiceDelay).prefix(10)
-        if !delays.isEmpty {
-            let sorted = delays.sorted()
-            let median = sorted[sorted.count / 2], worst = sorted.last!
-            Text(String(format: "Delay, last %d: median %.2f s, worst %.2f s (target < %.1f s)",
-                        delays.count, median, worst, Decoder.delayTarget))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(worst < Decoder.delayTarget ? .green : .orange)
         }
     }
 }
