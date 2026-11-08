@@ -6,4 +6,6 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@': path.resolve(__dirname, './src') } },
+  // `npm run dev` + `npm start` side by side: the dev site forwards /api to the Node server.
+  server: { proxy: { '/api': 'http://localhost:3000' } },
 })
