@@ -54,10 +54,12 @@ final class Enrollment {
         case finished
     }
 
-    var reps = 3
-    var blockCount = 3
-    var noisePerBlock = 4
-    var quizAfterBlock = true
+    // Defaults aim at about 3 minutes for the 12-word vocabulary (D48): 2 × (12 × 2 + 1) = 50 prompts.
+    // 2 blocks is the minimum for the honest held-out score and auto-tune; more can be added in the training console.
+    var reps = 2
+    var blockCount = 2
+    var noisePerBlock = 1
+    var quizAfterBlock = false
     /// Words that get extra reps in training blocks (the confused ones).
     var focusWords: Set<String> = []
     var focusExtraReps = 2

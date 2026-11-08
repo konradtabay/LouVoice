@@ -2,8 +2,8 @@ import LouVoiceCore
 import SwiftUI
 
 struct EnrollView: View {
-    /// Words with fewer training takes than this count as new. TODO(team): 9 = 3 blocks × 3 reps.
-    static let newWordTakes = 9
+    /// Words with fewer training takes than this count as new: one default session (2 blocks × 2 reps, D48).
+    static let newWordTakes = 4
     @Environment(AppModel.self) private var model
     @State private var newWord = ""
     @State private var teachWord = ""
@@ -347,7 +347,7 @@ private struct PromptCard: View {
             Label("Mouth each word silently with an exaggerated jaw, like talking through glass.", systemImage: "mouth")
             Label("Keep your head still; only your jaw moves.", systemImage: "person.fill")
             Label("Say it once, right after the beep.", systemImage: "speaker.wave.2")
-            Label("Between blocks you'll re-seat the AirPods, then get a short quiz.", systemImage: "arrow.triangle.2.circlepath")
+            Label("Between blocks you'll take the AirPods out and put them back in.", systemImage: "arrow.triangle.2.circlepath")
         }
         .font(.callout).foregroundStyle(.secondary)
         .padding(.top, 6)

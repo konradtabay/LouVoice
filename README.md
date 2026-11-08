@@ -23,7 +23,7 @@ open build/LouVoice.app       # allow Motion when asked
 
 Then:
 1. **Sensors**: check it's streaming at about 25 Hz.
-2. **Enroll**: about 10 minutes, with a re-seat between blocks.
+2. **Enroll**: about 3 minutes (2 blocks), with a re-seat between blocks. Add blocks for more accuracy.
 3. **Evaluate**: read the leave-one-block-out and quiz accuracy.
 4. **Tune**: change any pipeline variable or run auto-tune on your takes.
 5. **Decode**: press Space (or the stem) and mouth a word; nod to accept, shake to reject.
