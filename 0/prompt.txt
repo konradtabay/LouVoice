@@ -1,0 +1,1 @@
+Ok not really impressed with the accuracy on it, within the training process we should also constantly be testing acvuracy on the words, also we should be flexible maybe to move around some of the varuables ect
