@@ -1,4 +1,5 @@
 import Dither from '@/components/Dither'
+import ProgressChart from '@/components/ProgressChart'
 import { Cards, PageHero, Rows, Section } from '@/components/site'
 
 export default function Caregivers() {
@@ -40,6 +41,8 @@ export default function Caregivers() {
           ]}
         />
       </Section>
+
+      <ProgressChart />
     </>
   )
 }
