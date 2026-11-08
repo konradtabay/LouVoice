@@ -534,6 +534,11 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 
 **Trade-off accepted:** About 1 in 15 real sentences is refused ("try again"), in exchange for never speaking a sentence in response to random movement. More mixed-sentence blocks should tighten real sentences' scores and lower that refusal rate.
 
+### D48: Shorter default practice, about 3 minutes (2026-11-07)
+**Request:** Make the default practice session shorter, with fewer blocks, about 3 minutes.
+**Change:** Defaults go from 3 blocks × 3 reps, 4 non-word prompts and a quiz after each block (156 prompts, ~11 min for 12 words) to **2 blocks × 2 reps, 1 non-word prompt, no quiz** (50 prompts, ~3.7 min by the app's 4.4 s/prompt estimate, shown as "≈ 3 min"). "New word" threshold drops from 9 to 4 takes to match one default session.
+**Trade-off:** 4 takes per word instead of 9 means less data per session, so expect lower accuracy after a single session. Two blocks is the minimum for leave-one-block-out scoring and auto-tune. Run more blocks, or the quiz, from the training console when accuracy matters.
+
 ### D49: Word / sentence mode on the AirPods dot; each mode has a fixed output set (2026-11-07)
 **Request:** A Word / Sentence toggle on the Speak screen. Word mode detects only the single words of "hello can you hear me" for now. Sentence mode outputs "hello can you hear me", "my name is konrad how are you today", or nothing.
 
