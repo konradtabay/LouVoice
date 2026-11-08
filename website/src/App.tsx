@@ -37,7 +37,9 @@ export default function App() {
   }, [route])
 
   // The floating waitlist button appears once the page's first section (its hero) has scrolled away.
+  // It hides again while the closing section's own email form is on screen, so the two never stack.
   const [pastHero, setPastHero] = useState(false)
+  const [atJoin, setAtJoin] = useState(false)
   useEffect(() => {
     setPastHero(false)
     const el = document.querySelector('main > section')
@@ -46,11 +48,18 @@ export default function App() {
     io.observe(el)
     return () => io.disconnect()
   }, [path])
+  useEffect(() => {
+    const join = document.getElementById('join')
+    if (!join) return
+    const io = new IntersectionObserver(([e]) => setAtJoin(e.isIntersecting), { threshold: 0.15 })
+    io.observe(join)
+    return () => io.disconnect()
+  }, [])
 
   return (
     <div className="paper min-h-screen overflow-x-hidden text-ink">
       <Header />
-      <FloatingWaitlist show={pastHero} />
+      <FloatingWaitlist show={pastHero && !atJoin} />
       <main>
         <Page />
       </main>
