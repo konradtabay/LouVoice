@@ -1,0 +1,1 @@
+can you add noise to the training data, then examine it to improve something like this
