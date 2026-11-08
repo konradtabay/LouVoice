@@ -25,6 +25,100 @@ if args.contains("--sim-eval") {
     exit(0)
 }
 // --eval <dataset.json> [--tune]: honest evaluation of recorded takes, optionally auto-tuned.
+// --cnn-probs <weights.json> <features.json> <out.json>: Swift CNN probabilities for every exported
+// take, to check the Swift forward pass against the Python one (D53).
+if let i = args.firstIndex(of: "--cnn-probs"), i + 3 < args.count {
+    let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
+    let model = try! CNNWordModel(contentsOf: path(args[i + 1]))
+    let root = try! JSONSerialization.jsonObject(with: Data(contentsOf: path(args[i + 2]))) as! [String: Any]
+    let start = Date()
+    var out: [[Double]] = []
+    for t in root["takes"] as! [[String: Any]] {
+        let values = (t["values"] as! [NSNumber]).map(\.doubleValue)
+        let seq = FeatureSequence(values: values, dims: t["dims"] as! Int, vectorDims: t["vectorDims"] as? Int)
+        out.append(seq.count >= 4 ? model.probabilities(seq) : [])
+    }
+    try! JSONSerialization.data(withJSONObject: ["labels": model.labels, "probs": out]).write(to: path(args[i + 3]))
+    print(String(format: "%d takes in %.2f s (%.1f ms each)", out.count, Date().timeIntervalSince(start),
+                 Date().timeIntervalSince(start) / Double(max(out.count, 1)) * 1000))
+    exit(0)
+}
+
+// --calibration-sim <weights.json> <features.json> [k]: D55 in Swift. For every ordered pair of
+// tonight's quizzes, calibrate on the first k takes per word of one and test on all of the other.
+if let i = args.firstIndex(of: "--calibration-sim"), i + 2 < args.count {
+    let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
+    let model = try! CNNWordModel(contentsOf: path(args[i + 1]))
+    let k = i + 3 < args.count ? Int(args[i + 3]) ?? 4 : 4
+    let root = try! JSONSerialization.jsonObject(with: Data(contentsOf: path(args[i + 2]))) as! [String: Any]
+    struct Row { var seq: FeatureSequence; var label: String; var block: String; var test: Bool }
+    let rows: [Row] = (root["takes"] as! [[String: Any]]).compactMap { t in
+        let seq = FeatureSequence(values: (t["values"] as! [NSNumber]).map(\.doubleValue), dims: t["dims"] as! Int,
+                                  vectorDims: t["vectorDims"] as? Int)
+        let label = t["label"] as! String
+        guard seq.count >= 4, model.labels.contains(label) else { return nil }
+        return Row(seq: seq, label: label, block: t["block"] as! String, test: t["test"] as! Bool)
+    }
+    let quizzes = Set(rows.filter { $0.block.hasPrefix("quiz-") && $0.block >= "quiz-20261107-23" }.map(\.block)).sorted()
+    var rng = SeededRNG(seed: 0)
+    let replay = Array(rows.filter { !$0.test }.shuffled(using: &rng).prefix(150)).map { ($0.seq, $0.label) }
+    let words = model.labels.filter { $0 != noneLabel }
+    var base = (0, 0), cal = (0, 0)
+    var perWord: [String: (Int, Int, Int)] = [:]
+    let start = Date()
+    for a in quizzes { for b in quizzes where b != a {
+        let qa = rows.filter { $0.block == a }, qb = rows.filter { $0.block == b }
+        let calib = words.flatMap { w in qa.filter { $0.label == w }.prefix(k).map { ($0.seq, $0.label) } }
+        let adapted = model.calibrated(calibration: calib, replay: replay)
+        for t in qb {
+            let p0 = model.rank(t.seq).first?.label == t.label, p1 = adapted.rank(t.seq).first?.label == t.label
+            base.0 += p0 ? 1 : 0; cal.0 += p1 ? 1 : 0; base.1 += 1; cal.1 += 1
+            var c = perWord[t.label] ?? (0, 0, 0); c.0 += p0 ? 1 : 0; c.1 += p1 ? 1 : 0; c.2 += 1; perWord[t.label] = c
+        }
+    } }
+    print("quizzes: \(quizzes.joined(separator: ", ")); \(k) calibration takes per word; \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
+    print("not calibrated: \(base.0)/\(base.1)   calibrated: \(cal.0)/\(cal.1)")
+    print(words.map { w in let c = perWord[w] ?? (0, 0, 0); return "\(w) \(c.0)→\(c.1)/\(c.2)" }.joined(separator: "  "))
+    exit(0)
+}
+
+// --word-check <old.json> <new.json> [weights.json]: every word-mode take (5 words + _none) that is in
+// new.json but not old.json, decoded by DTW trained on old.json's training takes and by the CNN —
+// the honest live check for D53. Labels of "confirmed" takes are what was accepted, not ground truth.
+if let i = args.firstIndex(of: "--word-check"), i + 2 < args.count {
+    let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
+    let load = { (s: String) in try! JSONDecoder().decode(Dataset.self, from: Data(contentsOf: path(s))) }
+    let old = load(args[i + 1]), new = load(args[i + 2])
+    let cnn = try! CNNWordModel(contentsOf: path(i + 3 < args.count && !args[i + 3].hasPrefix("--") ? args[i + 3] : "Resources/Models/word_cnn.json"))
+    let words = ContextModel().tokenized.first ?? []
+    let allowed = Set(words)
+    let config = PipelineConfig.defaults
+    let train = old.trainingTakes.map(Tuner.RawTake.init)
+    let clf = Classifier(training: TrainingSet.build(train, config: config), config: config.classifier)!
+    let oldIDs = Set(old.takes.map(\.id))
+    let fresh = new.takes.filter { !oldIDs.contains($0.id) && !$0.isSentence && (allowed.contains($0.label) || $0.label == noneLabel) }
+    var dtwRight = 0, cnnRight = 0
+    var cnnPicks: [String: Int] = [:], dtwPicks: [String: Int] = [:]
+    print("\(fresh.count) new word-mode takes. label | DTW | CNN (top 3 probabilities)")
+    for t in fresh.sorted(by: { $0.createdAt < $1.createdAt }) {
+        guard let fd = Features.extract(t.samples, config: config.features) else { print("\(t.label): no features"); continue }
+        let d = clf.rank(fd.sequence, active: allowed).first?.label ?? "-"
+        let ranked = cnn.rank(fd.sequence, allowed: allowed.union([noneLabel]))
+        let c = ranked.first?.label ?? "-"
+        dtwRight += d == t.label ? 1 : 0; cnnRight += c == t.label ? 1 : 0
+        dtwPicks[d, default: 0] += 1; cnnPicks[c, default: 0] += 1
+        let top = ranked.prefix(3).map { String(format: "%@ %.2f", displayLabel($0.label), 1 - $0.score) }.joined(separator: ", ")
+        print(String(format: "%@ %-8@ | %-8@ | %-8@ (%@)", t.block.prefix(9) == "confirmed" ? "accepted" : "prompted",
+                     displayLabel(t.label), displayLabel(d), displayLabel(c), top))
+    }
+    print("agree with label: DTW \(dtwRight)/\(fresh.count), CNN \(cnnRight)/\(fresh.count)")
+    print("DTW answers:", dtwPicks.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    print("CNN answers:", cnnPicks.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    exit(0)
+}
+
+func displayLabel(_ l: String) -> String { l == noneLabel ? "(none)" : l }
+
 if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     let url = URL(fileURLWithPath: (args[i + 1] as NSString).expandingTildeInPath)
     guard let data = try? Data(contentsOf: url), var dataset = try? JSONDecoder().decode(Dataset.self, from: data) else {
@@ -41,6 +135,51 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     let train = dataset.trainingTakes.map(Tuner.RawTake.init)
     let blocks = Set(train.map(\.block)).count
     print("\(train.count) training takes, \(blocks) blocks, \(dataset.testTakes.count) quiz takes")
+
+    // --word-mode: Speak › Word accuracy on isolated takes of "hello can you hear me" (D49, D50).
+    if args.contains("--word-mode") {
+        let words = ContextModel().tokenized.first ?? defaultWords
+        let strong = ContextModel().weight
+        let everything: @Sendable (Take) -> Bool = { _ in true }
+        let isolated: @Sendable (Take) -> Bool = WordModeBenchmark.isIsolated
+        let variants: [WordModeBenchmark.Variant] = [
+            .init(name: "all takes, Strong context, any order", pool: everything, contextWeight: strong, previous: .randomOther),
+            .init(name: "all takes, no context", pool: everything, contextWeight: 0, previous: .none),
+            .init(name: "all takes, Strong context, in phrase order", pool: everything, contextWeight: strong, previous: .inOrder),
+            .init(name: "all takes, Balanced, any order", pool: everything, contextWeight: 0.3, previous: .randomOther),
+            .init(name: "isolated takes only, no context", pool: isolated, contextWeight: 0, previous: .none),
+        ]
+        for r in WordModeBenchmark.run(dataset, words: words, variants: variants) {
+            print(String(format: "%-42@ right %3d/%d = %3.0f%%   wrong %d   refused %d", r.name, r.correct, r.total,
+                         Double(r.correct) / Double(max(r.total, 1)) * 100, r.wrong, r.refused))
+            print("    " + words.map { w in let c = r.perWord[w] ?? (0, 0); return "\(w) \(c.0)/\(c.1)" }.joined(separator: "  "))
+            // "Not sure, say it again" below a margin: how often a spoken word is right vs how often it asks again.
+            for gate in [0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0] {
+                let kept = r.margins.filter { $0.0 >= gate }
+                let right = kept.filter(\.1).count
+                print(String(format: "      margin ≥ %.2f: spoken %3d/%d, right when spoken %3.0f%%, overall right %3.0f%%", gate,
+                             kept.count, r.total, Double(right) / Double(max(kept.count, 1)) * 100, Double(right) / Double(max(r.total, 1)) * 100))
+            }
+        }
+        exit(0)
+    }
+
+    // --export-features <out.json>: the default pipeline's features for every word take (training
+    // and quiz), for training models outside Swift on exactly what the recogniser sees.
+    if let j = args.firstIndex(of: "--export-features"), j + 1 < args.count {
+        let config = PipelineConfig.defaults.features
+        var rows: [[String: Any]] = []
+        for (take, isTest) in dataset.trainingTakes.map({ ($0, false) }) + dataset.testTakes.map({ ($0, true) }) {
+            guard let f = Features.extract(take.samples, config: config) else { continue }
+            let seq = f.sequence
+            rows.append(["id": take.id.uuidString, "label": take.label, "block": take.block, "test": isTest,
+                         "dims": seq.dims, "vectorDims": seq.vectorDims, "values": seq.values])
+        }
+        let out = URL(fileURLWithPath: (args[j + 1] as NSString).expandingTildeInPath)
+        try! JSONSerialization.data(withJSONObject: ["rate": config.rate, "takes": rows]).write(to: out)
+        print("exported \(rows.count) takes to \(out.path)")
+        exit(0)
+    }
 
     func report(_ name: String, _ config: PipelineConfig) {
         guard let r = Tuner.evaluate(train, config: config, permutations: 200) else { print("not enough data"); return }

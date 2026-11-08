@@ -2,7 +2,7 @@ import Foundation
 import LouVoiceCore
 import Observation
 
-/// Decode loop (PLAN §6): trigger (Space / stem / button) → beep → the same timed window as
+/// Decode loop (PLAN §6): trigger (Space / button; the stem toggles Speak aloud, D51) → beep → the same timed window as
 /// enrollment → classify off the main thread → nod/shake (or Y/N) confirmation window.
 @MainActor @Observable
 final class Decoder {
@@ -41,7 +41,10 @@ final class Decoder {
     var activeWords: Set<String> = []
     var maxScore: Double = 3.0
     var minMargin: Double = 0.0
-    var speakResult = true
+    /// "Speak aloud": off = words are shown but not spoken. Saved across launches.
+    var speakResult = UserDefaults.standard.object(forKey: "speakAloud") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(speakResult, forKey: "speakAloud") }
+    }
     /// One press = a whole sentence (D40). Off = the original one-word-per-press mode (kept as fallback).
     var sentenceMode = true
     var addConfirmedToTraining = true
@@ -67,8 +70,27 @@ final class Decoder {
     func expectedNext() -> [(word: String, p: Double)] {
         let ctx = model.config.context
         guard ctx.weight > 0 else { return [] }
-        let vocab = activeWords.isEmpty ? model.words : model.words.filter { activeWords.contains($0) }
+        let allowed = wordModeAllowed
+        let vocab = allowed.map { a in model.words.filter { a.contains($0) } } ?? model.words
         return ctx.expected(after: currentContext, vocabulary: vocab)
+    }
+
+    /// Word mode only decodes the words of the first expected phrase ("hello can you hear me").
+    /// TODO(team): "for now" — widen to every trained word (or both sentences) once single-word
+    /// accuracy on the newer words (my, name, is, konrad, how, are, today) is good enough.
+    var wordModeWords: [String] {
+        let trained = Set(model.words)
+        return (model.config.context.tokenized.first ?? []).filter { trained.contains($0) }
+    }
+
+    /// Words a word-mode decode may output (`_none` is always added by the classifier).
+    /// The Context screen's `activeWords` narrows it further. nil = no restriction
+    /// (only when fewer than two of the phrase's words are trained, so word mode still works).
+    private var wordModeAllowed: Set<String>? {
+        var allowed = Set(wordModeWords)
+        if allowed.count < 2 { allowed = [] }
+        if !activeWords.isEmpty { allowed = allowed.isEmpty ? activeWords : allowed.intersection(activeWords) }
+        return allowed.isEmpty ? nil : allowed
     }
 
     @ObservationIgnored private unowned let model: AppModel
@@ -95,7 +117,7 @@ final class Decoder {
             cues.play(.start)
             var simWord: String?
             if hub.isSimulated {
-                let pool = self.activeWords.isEmpty ? self.model.words : Array(self.activeWords)
+                let pool = self.wordModeAllowed.map { Array($0) } ?? self.model.words
                 simWord = self.simulatedWord ?? pool.randomElement()
                 hub.simulate(simWord.map { .word($0) })
             }
@@ -108,9 +130,24 @@ final class Decoder {
                 return
             }
             if self.rejectForHeadMovement(features, samples: samples) { return }
-            let active = self.activeWords.isEmpty ? nil : self.activeWords
+            let active = self.wordModeAllowed
+            // D53: the CNN decides single words when it knows every word that may come out.
+            // Otherwise (e.g. a newly taught word) the DTW classifier below is used, as before.
+            if let cnn = self.cnnForWordMode(active: active),
+               let cnnFeatures = Features.extract(samples, config: PipelineConfig.defaults.features) {
+                await self.finishWord(prediction: await Task.detached(priority: .userInitiated) {
+                    Self.cnnPrediction(cnn, cnnFeatures.sequence, allowed: active)
+                }.value, motionBest: nil, samples: samples, features: features, simWord: simWord,
+                   captureEnd: captureEnd, previous: self.currentContext)
+                return
+            }
             let (maxScore, minMargin) = (self.maxScore, self.minMargin)
-            let context = self.model.config.context, previous = self.currentContext
+            var context = self.model.config.context
+            let previous = self.currentContext
+            // Speak › Word: words come in any order, so no next-word context (D50). On recordings,
+            // Strong context out of order scored 36% against 68% for motion alone. The developer
+            // Decode screen keeps its context slider for experiments.
+            if self.model.screen == .speak { context.weight = 0 }
             let (prediction, motionBest) = await Task.detached(priority: .userInitiated) { () -> (Prediction, String?) in
                 let motion = classifier.rank(features.sequence, active: active)
                 let ranked = context.rescore(motion, previous: previous)
@@ -124,27 +161,58 @@ final class Decoder {
                 return (Prediction(ranked: ranked, margin: margin, accepted: reason == nil, rejectReason: reason), motion.first?.label)
             }.value
 
-            var result = Result(prediction: prediction, outcome: .pending, samples: samples,
-                                features: features, simulatedWord: simWord, motionBest: motionBest, contextWord: previous)
-            if prediction.accepted, let word = prediction.best?.label {
-                self.results.insert(result, at: 0)
-                if self.speakResult {
-                    let spoken = await self.model.voice.speak(word) // VOICE HOOK (Neel)
-                    // Quiet tail of the window after the word + processing + time to start playback.
-                    // Bluetooth output latency (~0.1–0.2 s) comes on top and isn't measurable here.
-                    let delay = features.trailingSeconds + Date().timeIntervalSince(captureEnd)
-                    if let i = self.results.firstIndex(where: { $0.id == result.id }) {
-                        self.results[i].voiceDelay = delay
-                        self.results[i].voiceSource = spoken.source
-                    }
+            await self.finishWord(prediction: prediction, motionBest: motionBest, samples: samples, features: features,
+                                  simWord: simWord, captureEnd: captureEnd, previous: previous)
+        }
+    }
+
+    /// Single-word CNN to use for this decode, or nil to use DTW (D53).
+    private func cnnForWordMode(active: Set<String>?) -> CNNWordModel? {
+        // Trained on real AirPods takes only: the simulator's synthetic motion keeps using DTW.
+        guard model.useWordCNN, !model.isSimulated, let cnn = model.wordCNN else { return nil }
+        let known = Set(cnn.labels)
+        let needed = active ?? Set(model.words)
+        return needed.isSubset(of: known) ? cnn : nil
+    }
+
+    /// CNN answer for one take. Lower score = better (1 − probability among the allowed words).
+    /// TODO(team): `cnnMinConfidence` below which it says "not sure" instead of guessing.
+    nonisolated static func cnnPrediction(_ cnn: CNNWordModel, _ seq: FeatureSequence, allowed: Set<String>?) -> Prediction {
+        let ranked = cnn.rank(seq, allowed: allowed.map { $0.union([noneLabel]) })
+        let margin = Classifier.margin(ranked)
+        var reason: String?
+        if let best = ranked.first {
+            if best.label == noneLabel { reason = "Looked like non-word movement" }
+            else if 1 - best.score < cnnMinConfidence { reason = "Not sure: try again" }
+        } else { reason = "No usable motion" }
+        return Prediction(ranked: ranked, margin: margin, accepted: reason == nil, rejectReason: reason)
+    }
+
+    nonisolated static let cnnMinConfidence = 0.0
+
+    private func finishWord(prediction: Prediction, motionBest: String?, samples: [MotionSample], features: SegmentFeatures,
+                            simWord: String?, captureEnd: Date, previous: String?) async {
+        let cues = model.cues
+        var result = Result(prediction: prediction, outcome: .pending, samples: samples,
+                            features: features, simulatedWord: simWord, motionBest: motionBest, contextWord: previous)
+        if prediction.accepted, let word = prediction.best?.label {
+            self.results.insert(result, at: 0)
+            if self.speakResult {
+                let spoken = await self.model.voice.speak(word) // VOICE HOOK (Neel)
+                // Quiet tail of the window after the word + processing + time to start playback.
+                // Bluetooth output latency (~0.1–0.2 s) comes on top and isn't measurable here.
+                let delay = features.trailingSeconds + Date().timeIntervalSince(captureEnd)
+                if let i = self.results.firstIndex(where: { $0.id == result.id }) {
+                    self.results[i].voiceDelay = delay
+                    self.results[i].voiceSource = spoken.source
                 }
-                self.startConfirm()
-            } else {
-                result.outcome = .discarded
-                self.results.insert(result, at: 0)
-                cues.play(.reject)
-                self.phase = .idle
             }
+            self.startConfirm()
+        } else {
+            result.outcome = .discarded
+            self.results.insert(result, at: 0)
+            cues.play(.reject)
+            self.phase = .idle
         }
     }
 
@@ -152,7 +220,16 @@ final class Decoder {
     private func triggerSentence() {
         guard phase == .idle || isConfirming, let classifier = model.classifier else { return }
         if isConfirming { finishConfirm(.unconfirmed) }
-        let hub = model.hub, cues = model.cues, config = model.config
+        let hub = model.hub, cues = model.cues
+        var config = model.config
+        // Speak screen: a sentence is always one of the expected phrases in full, or nothing (D45, D47).
+        // The developer Decode screen keeps its own switches for these.
+        if model.screen == .speak {
+            config.sentence.onlyExpectedPhrases = true
+            config.sentence.rejectNothing = true
+            // Both demo sentences are always possible on Speak (D56).
+            config.context.phrases = AppModel.speakPhrases(config.context.phrases)
+        }
         guard let decoder = SentenceDecoder(classifier: classifier, pipeline: config, config: config.sentence) else { return }
         phase = .recording
         Task { [weak self] in

@@ -10,14 +10,15 @@ struct StatusDot: View {
 
 struct SimulatorBanner: View {
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: "cpu")
-            Text("Simulator: synthetic motion for testing the flow. Its accuracy says nothing about real AirPods.")
+            Text("Test mode: using fake movement, not your AirPods. Switch back in Settings › Advanced.")
             Spacer()
         }
-        .font(.callout)
-        .padding(.horizontal, 16).padding(.vertical, 8)
-        .background(Color.purple.opacity(0.15))
+        .font(LV.sans(16, .medium))
+        .foregroundStyle(LV.pearl)
+        .padding(.horizontal, 32).padding(.vertical, 10)
+        .background(LV.heart)
     }
 }
 

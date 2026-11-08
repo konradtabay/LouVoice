@@ -538,3 +538,186 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 **Request:** Make the default practice session shorter, with fewer blocks, about 3 minutes.
 **Change:** Defaults go from 3 blocks × 3 reps, 4 non-word prompts and a quiz after each block (156 prompts, ~11 min for 12 words) to **2 blocks × 2 reps, 1 non-word prompt, no quiz** (50 prompts, ~3.7 min by the app's 4.4 s/prompt estimate, shown as "≈ 3 min"). "New word" threshold drops from 9 to 4 takes to match one default session.
 **Trade-off:** 4 takes per word instead of 9 means less data per session, so expect lower accuracy after a single session. Two blocks is the minimum for leave-one-block-out scoring and auto-tune. Run more blocks, or the quiz, from the training console when accuracy matters.
+
+### D49: Word / sentence mode on the AirPods dot; each mode has a fixed output set (2026-11-07)
+**Request:** A Word / Sentence toggle on the Speak screen. Word mode detects only the single words of "hello can you hear me" for now. Sentence mode outputs "hello can you hear me", "my name is konrad how are you today", or nothing.
+
+**Changes:**
+- **Switching modes:** click the header's AirPods dot (`LiveIndicator`). Green = word mode, purple = sentence mode; only the colour changes, with no mode text beside "AirPods on" (user request). It's bound to `Decoder.sentenceMode` (same setting as Settings › Speaking) and does nothing while recording or thinking. While the AirPods are off, the dot stays orange and clicking it still opens Signals. (A Word | Sentence switch on Speak was tried first and replaced by this.)
+- **Word mode:** decoding is limited to the trained words of the first expected phrase (`Decoder.wordModeWords`; `_none` is still allowed, so movement is still refused). The Context screen's `activeWords` narrows this further. If fewer than two of those words are trained, word mode falls back to every trained word, so the one-word fallback always works (CLAUDE.md rule 3). `TODO(team)`: widen to all words once the newer words are accurate enough.
+- **Sentence mode on Speak:** always runs with `onlyExpectedPhrases` and `rejectNothing` on (D45, D47), whatever the developer switches on Decode say. The Decode screen keeps its own switches for experiments.
+
+### D50: Word mode on Speak uses no next-word context (2026-11-07). *Amends D38 for word mode.*
+**Request:** Word mode only has the 5 words of "hello can you hear me", so it should be near 95–100%.
+
+**Test** (`LouVoiceCheck --eval … --word-mode`): every isolated take of the 5 words (enrollment and quiz blocks, 330 takes) decoded by a model that never saw its block, restricted to the 5 words plus `_none`, exactly as `Decoder.trigger()` does:
+
+| Setup | Right | Wrong | Refused |
+|---|---|---|---|
+| Strong context, words in any order (**what Speak › Word did**) | 36% | 62% | 2% |
+| Balanced context, any order | 49% | 47% | 4% |
+| **No context, any order (chosen)** | **68%** | 30% | 2% |
+| Strong context, words in phrase order | 98% | 2% | 1% |
+| No context, trained on isolated takes only (no sentence cuts) | 68% | 30% | 2% |
+
+**Findings:**
+- The earlier 94–100% figures (D37, D41) come from the context model when the words follow the phrase. Out of order, Strong context overrides the motion and halves accuracy.
+- Restricting to 5 words doesn't make single words easy: motion alone is 68% (hello 59–62%, you 78–79%).
+- Word takes cut from sentences neither help nor hurt isolated words.
+- A "not sure, say it again" margin gate doesn't reach 95% usefully: margin ≥ 0.2 makes spoken words 90% right but refuses 69% of tries.
+
+**Decision:** The user chose **any order** for word mode. Speak › Word decodes with context weight 0; the Decode screen keeps its context slider. Getting closer to 95% in any order needs a better motion model or more data, not settings.
+
+### D50: Speak aloud switch; ElevenLabs key read once; voice check (2026-11-07)
+- **Speak aloud** (`Decoder.speakResult`) is now saved (UserDefaults `speakAloud`) and has a switch at the top of the Speak screen; Settings › Speaking uses the same name. Off = words are shown, not spoken.
+- **"Speak in my voice" off** now uses the Mac's voice instead of going silent; muting is Speak aloud's job.
+- **API key:** read from the Keychain once per launch and kept in memory. The app is ad-hoc signed, so every rebuild is a "new app" to the Keychain and asks once (Always Allow); before, it read the Keychain on every spoken word. Saving a key now replaces an item an older build made if the update is refused.
+- **Settings › Your voice:** a "Test ElevenLabs" button (fetches "hello" live and plays it), and status and errors always shown, not only inside set-up.
+- **`open build/LouVoice.app --args --voice-check`** runs the same test headless and prints whether a key and voice ID are saved and whether ElevenLabs answered (never the key). It must be launched through LaunchServices (`open`), not by running the binary directly (D27).
+- **Verified 2026-11-07:** key and voice ID saved, ElevenLabs returned "hello" in the user's voice in 0.6 s, and all 12 vocabulary words are cached as 44.1 kHz MP3s.
+
+### D51: The AirPods stem turns "Speak aloud" on and off (2026-11-07). *Replaces the stem-as-trigger part of D15.*
+**Request:** Make the stem press actually work, and have it switch spoken output on and off.
+
+**Why it didn't work:** `StemPress` was off by default and only switched on from Settings. The switch also didn't refresh, because `StemPress` wasn't observable. So a stem press normally reached Music or whichever app was "now playing", not LouVoice.
+
+**Changes:**
+- **On by default** at launch, remembered across launches (`stemEnabled`; Settings › Speaking › "AirPod stem turns speaking aloud on and off"). Not enabled in isolated runs (`LOUVOICE_DATA_DIR`: smoke test, snapshots).
+- **A press toggles `Decoder.speakResult` on any screen** and says "Speaking on" or "Speaking off" through the cue voice, so it works without looking at the screen. Starting a capture, and continuing after a practice break, are Space or the on-screen button.
+- **Keeping the stem:** LouVoice claims "now playing" again whenever it comes to the front (and restarts its silent output stream if it stopped). Another app playing media in the background can still take the stem until LouVoice is brought forward.
+- Text updated: Speak ("or press an AirPod stem" beside Speak aloud; "Or press Space."), Settings, the Decode console, the practice break, and the now-playing subtitle.
+
+**Not verified:** a real stem press on hardware. `TODO(team)`: test with AirPods Pro 2, including after Music has played.
+
+### D52: Claiming "now playing" needs real playback info (2026-11-07). *Fixes D51.*
+**Problem reported:** With LouVoice in front, a stem press un-paused Spotify instead.
+
+**Cause:** Checked with MediaRemote (`MRMediaRemoteGetNowPlayingApplicationPID`): a paused Spotify stayed the "now playing" app. In a throwaway test app, a title plus `playbackState = .playing` and a silent output stream did **not** take over. Adding playback rate 1, elapsed time 0, a duration and media type audio **did**. Near-inaudible real audio made no further difference.
+
+**Fix:** `StemPress.claimNowPlaying()` sets that full info. It runs on enable, again 1.5 s later (a claim made while the app is still opening can be ignored), whenever LouVoice comes to the front, and after every stem press, so the pause command a press sends doesn't leave LouVoice "paused".
+
+**Checked:** Spotify paused, then LouVoice launched: LouVoice holds now playing at 1, 3, 6 and 10 s. Spotify brought to the front, then LouVoice again: LouVoice reclaims it. **Not checked:** a physical stem press (needs a person).
+
+### D53: A CNN decodes single words in word mode (2026-11-07). *Replaces DTW for word mode when it knows every allowed word.*
+**Request:** Use a neural net for single words if it beats the DTW recogniser on held-out takes. Word mode only ever hears hello, can, you, hear, me (any order) or no word.
+
+**Model:** a small 1D CNN on the default pipeline's features (rotation + attitude + magnitudes, 25 Hz): 4 residual dilated Conv1d(64) + BatchNorm + GELU layers, masked average + max pooling, take length, one linear layer. 6 classes (the 5 words + `_none`), 3 networks averaged. Trained with the same augmentation family as `Augment.swift`, class-balanced loss. Trained offline in PyTorch (`scripts/nn/train_word_cnn.py`); weights ship as `Resources/Models/word_cnn.json` (3.9 MB); `CNNWordModel.swift` runs it in Swift (~6 ms per word, same top answer as PyTorch on all 748 takes, probabilities equal to 1e-7).
+
+**Test** (same protocol as `--word-mode`, D50: every isolated take of the 5 words, decoded by a model that never saw its block; plus every isolated `_none` take):
+
+| Model | Words right | Wrong | Refused | No-word refused |
+|---|---|---|---|---|
+| DTW, no context (what word mode used) | 68% (223/330) | 100 | 7 | – |
+| CNN, 13 classes, answer limited to the 6 | 80% (265/330) | 53 | 12 | 78% (43/55) |
+| **CNN, 6 classes (chosen)** | **81% (266/330)** | 56 | 8 | **80% (44/55)** |
+| CNN, 6 classes, other words count as no word | 80% (265/330) | 45 | 20 | 73% (40/55) |
+
+The shipped model (trained on every training take, never quiz takes) gets 50/55 quiz takes of the 5 words right (91%).
+
+Earlier, across all 12 words + `_none` (leave-one-block-out, 686 takes): CNN 57% vs DTW 51%, words 55% vs 49%, non-word rejected 80% vs 73%, quiz 85% vs 71%.
+
+**Behaviour:**
+- Word mode uses the CNN when it knows every word that may come out (`Decoder.cnnForWordMode`). A taught word it doesn't know, a missing weights file, or the simulator (CNN trained on real AirPods only) uses DTW as before, so the one-word fallback always works (CLAUDE.md rule 3).
+- Dev mode › Decode has a switch to compare CNN and DTW.
+- `TODO(team)`: `Decoder.cnnMinConfidence` is 0 (always answers; nod/shake confirms). At ≥ 0.7 it would speak 58% of the time and be right 93% of the time when it does.
+
+**Limit:** the CNN doesn't learn from new takes by itself. After more practice, re-run the export and `train_word_cnn.py` (instructions at the top of the script), then rebuild the app.
+
+### D54: History tab with simulated deterioration (2026-11-07)
+**Request:** A simple "History" tab showing change over time with ALS: two line graphs, movement strength and accuracy, with simulated data. Follow-ups: the "too weak" line near 20%, accuracy should stay up, and the graphs styled like the landing page's charts.
+
+**Changes:**
+- New tab **History** (`HistoryView`), after Speak: two Swift Charts line graphs **side by side**, **movement strength** (% of the first week) and **accuracy** (% of practice takes right). Each title has the current value inline (average of the last 4 weeks) and the change since the first 4. No explanatory subtext.
+- **Hover:** moving the pointer over either graph snaps to the nearest week in **both** graphs: a vertical line, a dot on each word, and a tooltip with that week's value (flipped to the left near the right edge). Simulated dates are anchored to the start of today, so they match exactly.
+- **Style:** one jagged line per graph (dark purple for strength, purple for accuracy), straight segments, no fill. The charts sit on the paper with a display-type title and gridlines at 0/50/100% only. The strength chart has a dashed "Too weak to read reliably" line at **20%** (`HistoryData.weakLevel`, `TODO(team)`). (A five-lines-per-word version was tried and dropped for a single line.)
+- **Simulated data** (the on-screen "Simulated data" badge and hover hint were removed on request): 39 weekly points over about nine months, deterministic (SplitMix64 seed 7). Strength = 100 − 52·t^1.35 ± 4. Accuracy **stays high**: 95% easing about 4 points over the period (−3.5 to +3 noise), because regular practice keeps LouVoice adapted. It only drops within 15 points of the "too weak" line.
+- **Header:** the tabs now share the row with the logo and buttons (flexible space either side) instead of a centred overlay, because four tabs plus Help and Settings overlapped the AirPods dot.
+
+**Next (`TODO(team)`):** replace the simulation with real numbers per word and session: average take strength (the quality gate's motion energy) relative to the first block, and held-out accuracy per training block.
+
+### D55: One-time calibration of the word CNN before Speak (2026-11-08). *Extends D53.*
+**Problem:** Live quizzes on 2026-11-07/08 scored the shipped CNN at 38% (46/120 over three 20-take quizzes) against 81% offline. The earbud sat about 10–15° differently than in the afternoon sessions that make up most of the training data (resting gravity x +0.17…+0.19 vs −0.06), and "hear"/"me" were mouthed smaller. The offline test held out rounds from the same afternoon, so it didn't see this.
+
+**Fix:** The first time Speak is used in word mode (real AirPods), it asks for a calibration: each word-mode word mouthed 4 times (20 prompts, ~80 s, no quiz or adaptive extras). Then, per network: BatchNorm statistics are re-measured on those takes and blended 50/50 with the trained ones, and the last layer is retrained (Adam, 150 steps, lr 0.01, cross-entropy on the calibration takes + 0.5 × a 32-take batch from 150 replayed training takes). Takes ~2 s. The result is saved to `word_cnn_calibration.json` next to the dataset and loaded at launch; the takes are kept as training data (block `calibrate-…`). Settings › Speaking shows when it was calibrated and has **Recalibrate**.
+
+**Test** (calibrate on the first k takes per word of one of tonight's quizzes, test on another, all 6 ordered pairs, 120 test takes; `LouVoiceCheck --calibration-sim`):
+
+| Method (Python) | k = 1 | k = 2 | k = 4 |
+|---|---|---|---|
+| No calibration | 38% | 38% | 38% |
+| BatchNorm re-measure only | 38% | 38% | 36% |
+| Prototypes | 43% | 41% | 43% |
+| Last layer | 48% | 50% | 58% |
+| **50% BatchNorm + last layer (chosen)** | 51% | 48% | **61%** |
+| Fine-tune everything (needs autograd in the app) | 53% | 54% | 68% |
+
+Swift implementation, k = 4: 46/120 → **77/120 (64%)**; hear 0 → 18/24, me 8 → 13, can 6 → 10, hello 12 → 15, you 20 → 21. k = 2 only reaches 57/120, hence 4.
+
+**Limits:** all three test quizzes come from one evening. Full fine-tuning would add ~7 points but needs training support in Swift (MPSGraph / MLX); not done. The base model still needs more sessions recorded in different fits.
+
+### D56: Sentences are spoken as one ElevenLabs clip; both demo sentences always on (2026-11-08)
+**Request:** Speak a decoded sentence as a whole sentence, not word clips back to back, and make sure both "hello can you hear me" and "my name is konrad how are you today" are possible in sentence mode.
+
+**Changes:**
+- `VoiceService.speak(words:)` plays the whole sentence as one clip: cached if prepared, otherwise fetched live and cached. Only if that fails does it fall back to the word clips (D39 behaviour), then to text only.
+- `AppModel.voiceVocabulary` = every word + every expected phrase. All `prepare` calls (launch, new word, end of training, Settings › Get all words ready) use it, so both sentences are cached as whole clips and play instantly and offline.
+- `AppModel.speakPhrases`: Speak's sentence mode always includes both default sentences, even if the phrase list was edited in dev mode.
+
+**Check:** `LouVoiceCheck --eval … --demo` on the current data: 50 recorded sentence takes (33 × sentence 1, 17 × sentence 2), combined vote 50/50 right.
+
+### D57: One-time sentence calibration before Speak in sentence mode (2026-11-08). *Extends D55 to sentences.*
+**Problem:** "my name is konrad how are you today" stopped being recognised live. All 17 recordings of it were made 18:31–18:39 with the earbud at a resting tilt of −0.06…−0.01 (gravity x); tonight's fit is +0.17 (D55). Whole-sentence matching (D46) compares against those recordings, so tonight's fit doesn't match them.
+
+**Fix:** The first time Speak is used in sentence mode (real AirPods), it asks for a sentence calibration: each Speak sentence mouthed 3 times (both demo sentences → 6 prompts, full length, shuffled; `Enrollment.startSentences(…, balanced: true)`). They're saved like sentence training (whole-sentence references plus word takes cut from them), the recogniser is rebuilt so they're used straight away, and a marker file (`sentence_calibration.json`) records that it's done. Settings › Speaking › Recalibrate clears both the word (D55) and sentence calibrations.
+
+**Not measured:** there are no labelled sentence takes in tonight's fit yet to test with; the first calibration creates them. Re-check with `--demo` after it.
+
+### D58: Recalibrate on Speak; "Speak aloud" picks the output device (2026-11-08)
+**Request:** Let calibration be reset with a Recalibrate button on Speak, and make "Speak aloud" a dropdown of the Mac's audio outputs.
+
+**Changes:**
+- **Recalibrate on Speak:** a button beside Speak aloud (when the word model is loaded) runs `resetCalibration()` then `startCalibration()`, so the calibration card appears straight away. It's disabled while recording, thinking or practising. Its tooltip shows when the last calibration was. Settings › Speaking keeps its own Recalibrate.
+- **Speak aloud dropdown** (`SpeakAloudMenu`, on Speak and in Settings › Speaking): Off, System default (with the device's name), then every output device from CoreAudio (`AudioOutputs.list()`), plus "Refresh list". Off sets `Decoder.speakResult` false; picking a device turns it on and saves `VoiceService.outputDeviceUID` (UserDefaults `speakOutputDevice`). The AirPods stem still toggles on/off (D51) and keeps the chosen device.
+- **Routing:** ElevenLabs clips use `AVAudioPlayer.currentDevice` and `AVQueuePlayer.audioOutputDeviceUniqueID`. The Mac voice fallback can't choose a device, so with a device chosen it's rendered to a short file (`AVSpeechSynthesizer.write`) and played the same way. That adds roughly 0.1–0.3 s. If the chosen device is disconnected, the system default is used, and the menu says "device not connected". Cue beeps still use the system default.
+
+**Not checked:** sound actually coming out of a non-default device (this Mac listed only its built-in speakers at the time).
+
+### D59: The Speak aloud dropdown is drawn in the site's style (2026-11-08). *Amends D58.*
+**Request:** The audio-output dropdown should look on theme.
+
+**Change:** `SpeakAloudMenu` no longer uses a system `Menu`, whose open list is a grey macOS menu that can't be styled. It now has:
+- a button that inverts to ink while open, with a rotating chevron;
+- a hand-drawn list below it: pearl paper, ink hairline, heart-purple offset shadow, square corners, an eyebrow heading "Speak my words on", and a device icon per row (AirPods, speakers, display);
+- a short description under Off and System default, a heart-purple tick on the current choice, and a faint ink wash on hover.
+
+Clicking outside the list or pressing Escape closes it. The rows that contain it (Speak top bar, Settings › Speaking) get a `zIndex` so the list draws over what's below.
+
+### D60: Slower ElevenLabs sentences; the Train/Speak signal preview zooms to jaw movement (2026-11-08)
+**Request:** Slow the ElevenLabs voice to a natural pace for sentences, and make the signal preview on Train and Speak big enough to see the signal change while speaking.
+
+**Sentence pace:**
+- Any multi-word text (a sentence) is requested with `voice_settings.speed = 0.85` (`VoiceService.sentenceSpeed`, `TODO(team)`: tune by ear within 0.7–1.2). This slows it without lowering the pitch.
+- Single words stay at normal speed, so they stay quick.
+- The speed is part of the cache key, so sentence clips made at the old speed aren't reused. Each sentence is fetched once at the new pace (live on first use, or when the voice cache is prepared), then cached. Word clips keep their old keys and aren't refetched.
+- New self-test: a slow request carries the speed, the slow clip has its own cache key, and speed 1 keeps the old key.
+
+**Signal preview:**
+- `SignalPreview` previously used the Signals page's fixed ±1.6 rad/s scale, where mouthing (0.1–0.2 rad/s, D43) was a near-flat line.
+- Each rotation axis is now centred on its mean over the 10 s window, and the scale follows the largest recent movement × 1.1, never tighter than ±0.12 rad/s (`SignalPreview.minRange`, `TODO(team)`), so rest noise (~0.02) stays a thin band.
+- The preview is 110 pt tall instead of 90. The Signals page keeps its fixed scale.
+
+### D61: Word-by-word sentence fallback plays on the chosen output (2026-11-08). *Fixes D58.*
+**Problem:** "Speak aloud" set to the MacBook speakers still played on the AirPods.
+
+**Checked** (standalone test, volume 0, reading `kAudioDevicePropertyDeviceIsRunningSomewhere` per device): `AVAudioPlayer.currentDevice = "BuiltInSpeakerDevice"` does start the speakers (single clips, D56 whole sentences, the rendered system voice). `AVPlayer` / `AVQueuePlayer.audioOutputDeviceUniqueID` did **not**: the speakers stayed idle and the default output (AirPods) played. That queue was the word-by-word fallback for a sentence.
+
+**Fix:** The fallback chains the clips on `AVAudioPlayer` (`ClipSequence`, a delegate that starts the next clip when one finishes), each with `currentDevice` set. Re-tested: the speakers run for the whole sequence. Starting a single clip stops any running sequence.
+
+**Still on the default output:** the prompt beeps and spoken prompts (`CueService`), on purpose: they're for the wearer.
+
+### D62: Speak aloud warns when the chosen output is muted in macOS (2026-11-08)
+**Problem:** Speak aloud set to MacBook Pro Speakers was silent. The speakers were muted at the macOS level (mute = 1, volume 1.00). The AirPods were the system default output, so the menu-bar volume showed the AirPods (not muted) and the speakers' mute wasn't visible anywhere. The app was routing correctly (D61) into a muted device.
+
+**Change:** `AudioOutputs.isSilent(uid)` reads the device's output mute and volume (main and per-channel elements). The Speak aloud menu re-checks whenever it opens: a muted or zero-volume device shows "Muted in macOS" under its name, and the closed button shows "(muted)" after the selected device. The app doesn't change system audio settings itself; unmute in Control Center › Sound.
+
+**Checked:** with the current hardware state, MacBook Pro Speakers → silent, AirPods Pro → not silent.

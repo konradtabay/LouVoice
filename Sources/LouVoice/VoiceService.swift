@@ -26,6 +26,14 @@ final class VoiceService {
     }
 
     var settings: Settings { didSet { saveSettings() } }
+    /// Where spoken words play (D58): an output device UID, or nil for the system default.
+    /// Remembered across launches. If that device is disconnected, the system default is used.
+    var outputDeviceUID: String? {
+        didSet { if !isolated { UserDefaults.standard.set(outputDeviceUID, forKey: Self.outputKey) } }
+    }
+    static let outputKey = "speakOutputDevice"
+    /// The chosen device if it's connected right now, else nil (system default).
+    private var routeUID: String? { outputDeviceUID.flatMap { AudioOutputs.isConnected($0) ? $0 : nil } }
     /// The ElevenLabs voice clone ID (UserDefaults; not secret).
     var voiceID: String { didSet { saveVoiceID() } }
     private(set) var cachedWords: Set<String> = []
@@ -39,7 +47,7 @@ final class VoiceService {
     private(set) var lastTextOnly: String?
 
     @ObservationIgnored private var player: AVAudioPlayer?
-    @ObservationIgnored private var sequencePlayer: AVQueuePlayer?
+    @ObservationIgnored private var sequencePlayer: ClipSequence?
     @ObservationIgnored private let fallback = AVSpeechSynthesizer()
     @ObservationIgnored private let log = Logger(subsystem: "LouVoice", category: "voice")
     static let settingsKey = "voiceSettings.v2"
@@ -52,13 +60,20 @@ final class VoiceService {
         if !isolated, let data = UserDefaults.standard.data(forKey: Self.settingsKey),
            let s = try? JSONDecoder().decode(Settings.self, from: data) { settings = s } else { settings = Settings() }
         voiceID = isolated ? "" : (UserDefaults.standard.string(forKey: Self.voiceIDKey) ?? "")
+        outputDeviceUID = isolated ? nil : UserDefaults.standard.string(forKey: Self.outputKey)
     }
 
     // MARK: Key (Keychain, or ELEVENLABS_API_KEY for development; never in the bundle or the repo)
 
+    /// The key, read from the Keychain once per launch. Every rebuild of the ad-hoc-signed app is
+    /// a "new app" to the Keychain, which asks before letting it read the key; reading once means
+    /// one prompt ("Always Allow") instead of one per spoken word.
+    @ObservationIgnored private var keyLoaded = false
+    @ObservationIgnored private var cachedKey: String?
     private var apiKey: String? {
         if let env = ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"], !env.isEmpty { return env }
-        return KeychainStore.read()
+        if !keyLoaded { cachedKey = KeychainStore.read(); keyLoaded = true }
+        return cachedKey
     }
     var hasKey: Bool { apiKey != nil }
     var isConfigured: Bool { hasKey && !VoiceCache.sanitizedVoiceID(voiceID).isEmpty }
@@ -66,11 +81,17 @@ final class VoiceService {
     func setAPIKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        status = KeychainStore.save(trimmed) ? "API key saved in Keychain" : "Couldn't save the API key to the Keychain"
+        if KeychainStore.save(trimmed) {
+            cachedKey = trimmed; keyLoaded = true; lastError = nil
+            status = "API key saved in Keychain"
+        } else {
+            status = "Couldn't save the API key to the Keychain"
+        }
     }
 
     func removeAPIKey() {
         KeychainStore.delete()
+        cachedKey = nil; keyLoaded = true
         status = "API key removed"
     }
 
@@ -79,13 +100,36 @@ final class VoiceService {
     /// <data dir>/VoiceCache — ~/Library/Application Support/LouVoice/VoiceCache unless LOUVOICE_DATA_DIR is set.
     private var cacheRoot: URL { DatasetStore.directory.appending(path: "VoiceCache", directoryHint: .isDirectory) }
 
+    /// ElevenLabs speed for sentences (D60). The flash model reads a whole sentence fast and clipped;
+    /// a little slower sounds like natural speech. Single words stay at normal speed, so they stay
+    /// snappy. TODO(team): tune by ear (0.7–1.2).
+    static let sentenceSpeed = 0.85
+    /// Speed for `text`: slower for a sentence (more than one word), normal for a word.
+    private func speed(for text: String) -> Double? { text.contains(" ") ? Self.sentenceSpeed : nil }
+
     private func cacheURL(_ text: String) -> URL? {
-        VoiceCache.cacheURL(text: text, voiceID: voiceID, modelID: settings.modelID, root: cacheRoot)
+        VoiceCache.cacheURL(text: text, voiceID: voiceID, modelID: settings.modelID, speed: speed(for: text), root: cacheRoot)
     }
 
     private func isCached(_ text: String) -> Bool {
         guard let url = cacheURL(text) else { return false }
         return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// Settings › "Test my voice": fetches one word live (bypassing the cache) and plays it, and
+    /// says exactly what went wrong if it fails.
+    func testConnection() async {
+        lastError = nil
+        guard hasKey else { status = "No API key saved"; return }
+        guard !VoiceCache.sanitizedVoiceID(voiceID).isEmpty else { status = "No voice ID saved"; return }
+        status = "Asking ElevenLabs…"
+        let start = Date()
+        if let url = cacheURL("hello") { try? FileManager.default.removeItem(at: url) }
+        guard let url = await fetch("hello") else { status = "ElevenLabs test failed"; return }
+        cachedWords.insert("hello")
+        let ok = play(url)
+        status = ok ? String(format: "ElevenLabs works: \"hello\" in your voice, %.1f s", Date().timeIntervalSince(start))
+                    : "Got audio from ElevenLabs but couldn't play it"
     }
 
     func refreshCache(words: [String]) {
@@ -141,7 +185,7 @@ final class VoiceService {
     func speak(_ text: String) async -> (source: Source, seconds: Double) {
         let start = Date()
         lastTextOnly = nil
-        guard settings.enabled else { return finish(text, .textOnly, start, played: false) }
+        guard settings.enabled else { return speakSystem(text, start) }
         // TODO(team): with no key/voice set up at all, the system voice keeps decode audible for
         // demos. Once set up, a failed fetch shows text only (team decision, 2026-11-07).
         guard isConfigured else { return speakSystem(text, start) }
@@ -156,28 +200,38 @@ final class VoiceService {
         return finish(text, source, start, played: true)
     }
 
-    /// A sentence: the cached word clips back to back (fetching any missing ones). If any word
-    /// can't be voiced, the sentence is shown as text only.
+    /// A sentence, spoken as one ElevenLabs clip so it flows naturally (D56): cached if it was
+    /// prepared (the expected phrases are), otherwise fetched live and cached. Only if that fails
+    /// are the cached single-word clips played back to back; if a word can't be voiced either,
+    /// the sentence is shown as text only.
     @discardableResult
     func speak(words: [String]) async -> (source: Source, seconds: Double) {
         let start = Date()
         let text = words.joined(separator: " ")
         lastTextOnly = nil
-        guard settings.enabled else { return finish(text, .textOnly, start, played: false) }
-        guard isConfigured else { return speakSystem(text, start) }
-        var urls: [URL] = []
+        guard settings.enabled, isConfigured else { return speakSystem(text, start) }
         var source = Source.cache
+        var whole = cacheURL(text).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        if whole == nil {
+            source = .live
+            whole = await fetch(text)
+        }
+        if let whole, play(whole) { return finish(text, source, start, played: true) }
+        // Fallback: word clips back to back.
+        var urls: [URL] = []
         for w in words {
             if let u = cacheURL(w), FileManager.default.fileExists(atPath: u.path) { urls.append(u); continue }
-            source = .live
             guard let u = await fetch(w) else { return finish(text, .textOnly, start, played: false) }
             cachedWords.insert(w)
             urls.append(u)
         }
-        let queue = AVQueuePlayer(items: urls.map { AVPlayerItem(url: $0) })
-        queue.play()
-        sequencePlayer = queue
-        return finish(text, source, start, played: true)
+        // AVQueuePlayer ignores audioOutputDeviceUniqueID here (checked: it stayed on the default
+        // output), so the clips are chained on AVAudioPlayer, which honours `currentDevice` (D61).
+        player?.stop()
+        let sequence = ClipSequence(urls: urls, device: routeUID)
+        guard sequence.start() else { return finish(text, .textOnly, start, played: false) }
+        sequencePlayer = sequence
+        return finish(text, .live, start, played: true)
     }
 
     private func finish(_ text: String, _ source: Source, _ start: Date, played: Bool) -> (source: Source, seconds: Double) {
@@ -196,13 +250,52 @@ final class VoiceService {
         fallback.stopSpeaking(at: .immediate)
         let u = AVSpeechUtterance(string: text)
         u.rate = 0.45
-        fallback.speak(u)
+        if let uid = routeUID {
+            // AVSpeechSynthesizer can't pick a device, so render the words to a short file and play
+            // that on the chosen device. Adds the render time (~0.1–0.3 s for a word or sentence).
+            renderAndPlay(u, on: uid)
+        } else {
+            fallback.speak(u)
+        }
         return finish(text, .system, start, played: true)
     }
 
-    private func play(_ url: URL) -> Bool {
+    @ObservationIgnored private var renderer: AVSpeechSynthesizer?
+    @ObservationIgnored private var renderFile: AVAudioFile?
+
+    private func renderAndPlay(_ utterance: AVSpeechUtterance, on uid: String) {
+        let synth = AVSpeechSynthesizer()
+        renderer = synth
+        renderFile = nil
+        let url = FileManager.default.temporaryDirectory.appending(path: "louvoice-system-voice.caf")
+        try? FileManager.default.removeItem(at: url)
+        synth.write(utterance) { [weak self] buffer in
+            guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.renderer === synth else { return }
+                    if pcm.frameLength == 0 {           // end of speech
+                        self.renderFile = nil             // closes the file
+                        self.renderer = nil
+                        _ = self.play(url, keepFile: true)
+                        return
+                    }
+                    if self.renderFile == nil {
+                        self.renderFile = try? AVAudioFile(forWriting: url, settings: pcm.format.settings,
+                                                           commonFormat: pcm.format.commonFormat, interleaved: pcm.format.isInterleaved)
+                    }
+                    try? self.renderFile?.write(from: pcm)
+                }
+            }
+        }
+    }
+
+    private func play(_ url: URL, keepFile: Bool = false) -> Bool {
+        sequencePlayer?.stop()
+        sequencePlayer = nil
         do {
             let p = try AVAudioPlayer(contentsOf: url)
+            p.currentDevice = routeUID
             p.prepareToPlay()
             guard p.play() else { return false }
             player = p
@@ -210,7 +303,7 @@ final class VoiceService {
         } catch {
             lastError = "Playback failed: \(error.localizedDescription)"
             // A corrupt cache file would fail forever; remove it so the next call refetches.
-            try? FileManager.default.removeItem(at: url)
+            if !keepFile { try? FileManager.default.removeItem(at: url) }
             return false
         }
     }
@@ -221,8 +314,8 @@ final class VoiceService {
     /// (recorded in `lastError`, without the key).
     private func fetch(_ text: String) async -> URL? {
         guard let key = apiKey, let url = cacheURL(text),
-              let request = VoiceCache.request(text: text, voiceID: voiceID, apiKey: key,
-                                               modelID: settings.modelID, outputFormat: settings.outputFormat) else {
+              let request = VoiceCache.request(text: text, voiceID: voiceID, apiKey: key, modelID: settings.modelID,
+                                               outputFormat: settings.outputFormat, speed: speed(for: text)) else {
             lastError = "Add an ElevenLabs API key and voice ID first."
             return nil
         }
@@ -254,5 +347,46 @@ final class VoiceService {
     private func saveVoiceID() {
         guard !isolated else { return }
         UserDefaults.standard.set(voiceID, forKey: Self.voiceIDKey)
+    }
+}
+
+/// Plays clips one after another on a chosen output device (`AVAudioPlayer.currentDevice`, nil =
+/// system default). Used for the word-by-word sentence fallback (D61).
+final class ClipSequence: NSObject, AVAudioPlayerDelegate {
+    private var urls: [URL]
+    private let device: String?
+    private var current: AVAudioPlayer?
+
+    init(urls: [URL], device: String?) {
+        self.urls = urls
+        self.device = device
+    }
+
+    /// Starts the first clip that can play; false if none can.
+    func start() -> Bool {
+        while !urls.isEmpty {
+            let url = urls.removeFirst()
+            guard let p = try? AVAudioPlayer(contentsOf: url) else { continue }
+            p.currentDevice = device
+            p.delegate = self
+            p.prepareToPlay()
+            if p.play() {
+                current = p
+                return true
+            }
+        }
+        current = nil
+        return false
+    }
+
+    func stop() {
+        urls.removeAll()
+        current?.stop()
+        current = nil
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        guard player === current else { return }
+        _ = start()
     }
 }

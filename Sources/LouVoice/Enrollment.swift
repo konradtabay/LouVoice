@@ -108,6 +108,8 @@ final class Enrollment {
     var sentenceBlocks = 3
     /// Prompt random contiguous parts of the phrase ("hello can", "you hear me") as well as the whole (D44).
     var varySentenceLength = false
+    /// Fixed prompt order for a balanced sentence session (calibration); empty = random choice.
+    @ObservationIgnored private var sentenceQueue: [[String]] = []
     /// Share of takes that are the full phrase when varying length.
     static let fullPhraseShare = 0.4
 
@@ -143,19 +145,21 @@ final class Enrollment {
     // MARK: Control
 
     /// Training enrollment, a quick "teach a new word" (one block, no noise), or a quiz.
-    func start(words: [String], reps: Int, blocks: Int, noisePerBlock: Int, prefix: String = "enroll", mode: Mode = .train) {
+    /// `plain`: exactly `reps` per word, no quiz, focus words or adaptive extras (calibration, D55).
+    func start(words: [String], reps: Int, blocks: Int, noisePerBlock: Int, prefix: String = "enroll", mode: Mode = .train,
+               plain: Bool = false) {
         guard task == nil, !words.isEmpty else { return }
         let session = Self.stamp()
         self.mode = mode
-        let quizzes = mode == .train && quizAfterBlock
-        let focus = mode == .train ? focusWords.intersection(words) : []
+        let quizzes = mode == .train && quizAfterBlock && !plain
+        let focus = mode == .train && !plain ? focusWords.intersection(words) : []
         let extra = focusExtraReps
         totalBlocks = blocks
         total = blocks * (words.count * reps + focus.count * extra + noisePerBlock) + (quizzes ? blocks * words.count : 0)
         completed = 0; rejected = 0; block = 0; log = []; results = []
         task = Task { [weak self] in
             await self?.run(words: words, reps: reps, blocks: blocks, noise: noisePerBlock,
-                            session: session, prefix: prefix, quizzes: quizzes, focus: focus, extra: extra)
+                            session: session, prefix: prefix, quizzes: quizzes, focus: focus, extra: extra, plain: plain)
             self?.task = nil
         }
     }
@@ -167,10 +171,12 @@ final class Enrollment {
     }
 
     /// Several phrases: each take picks one at random (balanced per block), e.g. both demo sentences (D45).
-    func startSentences(phrases: [String], reps: Int, blocks: Int) {
+    /// `balanced`: exactly reps ÷ phrases of each phrase, full length, shuffled (sentence calibration, D57).
+    func startSentences(phrases: [String], reps: Int, blocks: Int, balanced: Bool = false) {
         let list = phrases.map { $0.lowercased().split(whereSeparator: \.isWhitespace).map(String.init) }.filter { $0.count >= 2 }
         guard task == nil, let words = list.first else { return }
         sentencePhrases = list
+        sentenceQueue = balanced ? (0..<(blocks * reps)).map { list[$0 % list.count] }.shuffled() : []
         let session = Self.stamp()
         mode = .sentence
         totalBlocks = blocks
@@ -184,6 +190,7 @@ final class Enrollment {
 
     /// The words to prompt for one sentence take.
     private func pickSentence(_ words: [String]) -> [String] {
+        if !sentenceQueue.isEmpty { return sentenceQueue.removeFirst() }
         let words = sentencePhrases.count > 1 ? (sentencePhrases.randomElement() ?? words) : words
         guard varySentenceLength, words.count > 2, Double.random(in: 0..<1) >= Self.fullPhraseShare else { return words }
         let len = Int.random(in: 2...(words.count - 1))
@@ -285,7 +292,7 @@ final class Enrollment {
         cues.play(.ready)
         cues.say("Sentence training done")
         phase = .finished
-        if model.voice.isConfigured { await model.voice.prepare(words: model.words) }
+        if model.voice.isConfigured { await model.voice.prepare(words: model.voiceVocabulary) }
     }
 
     /// Simulator: perform the phrase's words one after another at a fast pace.
@@ -326,7 +333,7 @@ final class Enrollment {
     // MARK: Flow
 
     private func run(words: [String], reps: Int, blocks: Int, noise: Int, session: String, prefix: String, quizzes: Bool,
-                     focus: Set<String>, extra: Int) async {
+                     focus: Set<String>, extra: Int, plain: Bool = false) async {
         let hub = model.hub, cues = model.cues
 
         // No separate "stay still" calibration: the strength check is self-normalising (D32).
@@ -351,7 +358,7 @@ final class Enrollment {
             // Test-then-train: predict each new take with a model that has never seen this block.
             let blockID = "\(prefix)-\(session)-b\(b)"
             let honest = await buildClassifier(excluding: blockID)
-            plan = adaptive ? await makePlan(words: words) : BlockPlan()
+            plan = adaptive && !plain ? await makePlan(words: words) : BlockPlan()
             let prompts = Self.prompts(words: words, reps: reps, noise: noise, focus: focus, extra: extra, plan: plan)
             total += prompts.count - (words.count * reps + focus.count * extra + noise)
             if !plan.isEmpty { log.insert("Block \(b) plan: \(plan.summary)", at: 0) }
@@ -370,10 +377,10 @@ final class Enrollment {
         }
         if Task.isCancelled { return }
         cues.play(.ready)
-        cues.say(mode == .quiz ? "Quiz done" : "Enrollment done")
+        cues.say(mode == .quiz ? "Quiz done" : prefix == "calibrate" ? "Calibration done" : "Enrollment done")
         phase = .finished
         // Cache the user's voice for every word now, so decode playback is instant and offline.
-        if model.voice.isConfigured { await model.voice.prepare(words: model.words) }
+        if model.voice.isConfigured { await model.voice.prepare(words: model.voiceVocabulary) }
     }
 
     private func buildClassifier(excluding block: String?) async -> Classifier? {

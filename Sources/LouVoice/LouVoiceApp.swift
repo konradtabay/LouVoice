@@ -6,11 +6,13 @@ struct LouVoiceApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
 
+    init() { LV.registerFonts() }
+
     var body: some Scene {
         WindowGroup("LouVoice") {
             ContentView()
                 .environment(model)
-                .frame(minWidth: 920, minHeight: 620)
+                .frame(minWidth: 1240, minHeight: 760)  // header: centred tabs + AirPods dot, Help, Settings
                 .onAppear { model.start() }
         }
         .windowToolbarStyle(.unified)

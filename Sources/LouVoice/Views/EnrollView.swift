@@ -131,6 +131,13 @@ struct EnrollView: View {
                     if !newWords.isEmpty {
                         Text("New: " + newWords.joined(separator: ", ")).font(.caption).foregroundStyle(.orange)
                     }
+                    // D53 data collection: practise only the word-mode words (plus non-word prompts),
+                    // with the usual re-seat breaks, so every take is useful for the CNN.
+                    let wordModeWords = model.decoder.wordModeWords
+                    Button("Word-mode practice: \(wordModeWords.joined(separator: " · "))") {
+                        e.start(words: wordModeWords, reps: e.reps, blocks: e.blockCount, noisePerBlock: e.noisePerBlock)
+                    }
+                    .disabled(!canRecord || wordModeWords.isEmpty)
                 }
             }
             SectionCard(title: "Sentence training (flowing)") {
@@ -157,6 +164,13 @@ struct EnrollView: View {
                 Stepper("Reps per word: \(quizReps)", value: $quizReps, in: 1...5)
                 Button("Run quiz") { e.startQuiz(words: model.words, reps: quizReps) }
                     .disabled(!canRecord || model.classifier == nil)
+                // D53 check: only the word-mode words, so every prompt scores the CNN. Score with
+                // `LouVoiceCheck --word-check <dataset before> <dataset after>` (live feedback here is DTW's).
+                let wordModeWords = model.decoder.wordModeWords
+                Button("Word-mode quiz: \(wordModeWords.joined(separator: " · ")) (×\(quizReps * 2))") {
+                    e.startQuiz(words: wordModeWords, reps: quizReps * 2)
+                }
+                .disabled(!canRecord || model.classifier == nil || wordModeWords.isEmpty)
                 Text("Measures the current model on fresh takes it has never seen. Re-seat first for the honest number.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -302,15 +316,15 @@ private struct PromptCard: View {
                 Text("Re-seat your AirPods").font(.title.weight(.semibold))
                 Text("Take both out, put them back in, then continue to block \(next).\nThis is what makes the accuracy number honest.")
                     .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                Button("Continue (Space or stem)") { model.enrollment.continueAfterBreak() }
+                Button("Continue (Space)") { model.enrollment.continueAfterBreak() }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             case .finished:
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 54)).foregroundStyle(.green)
                 Text(model.enrollment.mode == .quiz ? "Quiz complete" : model.enrollment.mode == .sentence ? "Sentence training complete" : "Training complete")
                     .font(.title.weight(.semibold))
                 HStack {
-                    Button("Evaluate") { model.screen = .evaluate; model.runEvaluation() }
-                    Button("Auto-tune") { model.screen = .tune; model.runAutoTune() }
+                    Button("Evaluate") { if model.devMode { model.devScreen = .evaluate } else { model.advancedPage = .accuracy }; model.runEvaluation() }
+                    Button("Auto-tune") { if model.devMode { model.devScreen = .tune } else { model.advancedPage = .fineTune }; model.runAutoTune() }
                 }
                 .buttonStyle(.borderedProminent)
             }
