@@ -18,9 +18,6 @@ struct SpeakView: View {
                 .toggleStyle(LVToggleStyle())
                 .fixedSize()
                 .help("Off: your words are shown on screen but not spoken. Press an AirPod stem to switch.")
-                if model.stem.isEnabled {
-                    Text("or press an AirPod stem").font(LV.sans(16)).foregroundStyle(LV.muted)
-                }
             }
             SpeakCard().frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack(alignment: .bottom, spacing: 24) {
