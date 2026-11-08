@@ -1,0 +1,1 @@
+Do you think we can use synthetic data to better train other sentances aswell at this point, you dont need to say yes only if confident
