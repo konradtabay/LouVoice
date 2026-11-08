@@ -54,8 +54,9 @@ function LineChart({
           </g>
         ))}
         {rows.map((r, i) =>
-          i % 4 === 0 ? (
-            <text key={r.week} x={x(i)} y={H - 12} textAnchor="middle" fontSize={12} fill="#010101" fillOpacity={0.6}>
+          // one label per month, at the first week that falls in it
+          i === 0 || monthLabel(r.week) !== monthLabel(rows[i - 1].week) ? (
+            <text key={r.week} x={x(i)} y={H - 12} textAnchor={i === 0 ? 'start' : 'middle'} fontSize={12} fill="#010101" fillOpacity={0.6}>
               {monthLabel(r.week)}
             </text>
           ) : null,
