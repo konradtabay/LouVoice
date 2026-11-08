@@ -105,3 +105,19 @@ def locked(fit, name, raw=False, drop_confirmed=True, seed=0):
         fh.write(json.dumps(dict(time=time.strftime("%Y-%m-%d %H:%M:%S"), name=name, locked=acc, per=per)) + "\n")
     print(f"LOCKED {name}: {acc*100:.1f}% ({int(round(acc*60))}/60) " + " ".join(f"{w}={v*100:.0f}" for w, v in per.items()), flush=True)
     return acc
+
+
+XS_SESSIONS = ["20261107-135739", "20261107-141846", "20261107-143436"]
+
+
+def xsess(fit, name="", raw=False, seed=0, verbose=True, drop_confirmed=True):
+    """Cross-session (daytime): for each of 3 day sessions, train without ANY block of that session
+    (and without LOCKED / confirmed), test on that session's quiz takes of the 5 words. 55 takes."""
+    takes = load(raw); preds, tests = [], []
+    for s in XS_SESSIONS:
+        test = [t for t in takes if s in t["block"] and t["quiz"] and t["label"] in WORDS]
+        train = [t for t in _pool(takes, set(), drop_confirmed) if s not in t["block"]]
+        preds += list(np.argmax(fit(train, seed)(test), 1)); tests += test
+    acc = _acc(preds, tests)
+    if verbose: print(f"XS {name}: {acc*100:.1f}% ({sum(p == t['y'] for p, t in zip(preds, tests))}/{len(tests)})", flush=True)
+    return acc

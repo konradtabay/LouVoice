@@ -97,6 +97,22 @@ class Fast:
                 l = F.cross_entropy(net(A.to(DEV), M.to(DEV)), y[bi].to(DEV), weight=cwd, label_smoothing=c["smooth"])
                 opt.zero_grad(); l.backward(); opt.step()
 
+    def adabn(self, net, past, T0, r):
+        """Re-measure BatchNorm stats on the K most recent takes before T0 (labels unused), blend with trained."""
+        idx = torch.nonzero(past).flatten()
+        if len(idx) == 0: return
+        rec = idx[torch.argsort(self._created[idx], descending=True)[: r.get("K", 40)]]
+        bns = [m for m in net.modules() if isinstance(m, nn.BatchNorm1d)]
+        old = [(b.running_mean.clone(), b.running_var.clone()) for b in bns]
+        for b in bns: b.reset_running_stats(); b.momentum = None
+        net.train()
+        with torch.no_grad():
+            A, M = self.augment(self._X[rec], self._n[rec], None, train=False)
+            net(A.to(DEV), M.to(DEV))
+        a = r.get("alpha", 0.5)
+        for b, (m0, v0) in zip(bns, old):
+            b.running_mean.mul_(a).add_((1 - a) * m0); b.running_var.mul_(a).add_((1 - a) * v0); b.momentum = 0.1
+
     def __call__(self, takes, seed=0):
         c = self.c; xk = c["xkey"]
         takes = [t for t in takes if t.get(xk) is not None and (c.get("filt") is None or c["filt"](t))]
@@ -152,7 +168,46 @@ class Fast:
             net.eval(); nets.append(net)
         self.nets, self.scale = nets, scale
 
+        created = torch.tensor([t["created"] for t in takes], dtype=torch.float64)
+        self._created, self._X, self._n = created, X, n
+
+        def adapt(T0):
+            """Causal recency fine-tune: copies of the nets, trained on takes recorded before T0,
+            sampled with weight exp(-(T0 - t) / tau) and mixed with uniform replay."""
+            import copy
+            r = c["rec"]; past = created < T0
+            if past.sum() < 8: return nets
+            w = torch.where(past, torch.exp(-(T0 - created) / (60 * r.get("tau_min", 30))), torch.zeros(1, dtype=torch.float64)).float()
+            if w.sum() <= 0: return nets
+            out = []
+            for k, base in enumerate(nets):
+                net = copy.deepcopy(base); g = torch.Generator().manual_seed(1000 + k)
+                opt = torch.optim.AdamW(net.parameters(), lr=r.get("lr", 5e-4), weight_decay=c["wd"]); net.train()
+                for st in range(r.get("steps", 150)):
+                    bi = torch.cat([torch.multinomial(w, r.get("bs", 32), replacement=True, generator=g),
+                                    torch.multinomial(past.float(), int(r.get("bs", 32) * r.get("replay", 1.0)), replacement=True, generator=g)])
+                    A, M = self.augment(X[bi], n[bi], g)
+                    l = F.cross_entropy(net(A.to(DEV), M.to(DEV)), y[bi].to(DEV), weight=cw.to(DEV), label_smoothing=c["smooth"])
+                    opt.zero_grad(); l.backward(); opt.step()
+                if r.get("adabn"):
+                    self.adabn(net, past, T0, r)
+                net.eval(); out.append(net)
+            return out
+
         def predict(test):
+            if c.get("rec"):
+                order = sorted(range(len(test)), key=lambda i: test[i]["created"]); groups, cur = [], [order[0]]
+                for i in order[1:]:
+                    if test[i]["created"] - test[cur[-1]]["created"] > 600: groups.append(cur); cur = [i]
+                    else: cur.append(i)
+                groups.append(cur); P = np.zeros((len(test), 6))
+                for gi in groups:
+                    T0 = min(test[i]["created"] for i in gi)
+                    P[gi] = run([test[i] for i in gi], adapt(T0))
+                return P
+            return run(test, nets)
+
+        def run(test, nets):
             Xt, nt = pad([t[xk] / scale if t.get(xk) is not None else np.zeros((4, X.shape[2]), np.float32) for t in test])
             g = torch.Generator().manual_seed(0)
             A, M = self.augment(Xt, nt, g, train=False)

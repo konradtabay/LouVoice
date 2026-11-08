@@ -9,7 +9,7 @@ def run(item):
     cmd = [sys.executable, os.path.join(HERE, "run.py"), name, expr, "--seeds", o.get("seeds", "0,1")]
     if o.get("raw"): cmd.append("--raw")
     if o.get("setup"): cmd += ["--setup", o["setup"]]
-    cmd += o.get("flags", [])
+    cmd += o.get("flags", []) + ([] if o.get("noxs") else ["--xs"])
     with open(os.path.join(HERE, "logs", name + ".log"), "w") as fh:
         subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=HERE)
     last = open(os.path.join(HERE, "logs", name + ".log")).read().strip().splitlines()
