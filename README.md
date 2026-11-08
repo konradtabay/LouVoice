@@ -141,4 +141,3 @@ Built at BioHacks 2026 by **Konrad Tabay** and **Neel Laroiya**.
 
 Copyright © 2026 Konrad Tabay and Neel Laroiya. All rights reserved. No license is granted to use, copy, modify or distribute this code without written permission.
 
-The approach builds on [joeblau/subvox](https://github.com/joeblau/subvox) (MIT). No subvox code is copied; the pipeline, recognizer and evaluation were re-implemented with the changes logged in DECISIONS.md.
