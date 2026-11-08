@@ -465,7 +465,10 @@ final class AppModel {
             let features = base.featureConfig
             let calib = self.dataset.takes.filter { $0.block.hasPrefix("calibrate-") && $0.createdAt >= started }
                 .compactMap { t in Features.extract(t.samples, config: features).map { ($0.sequence, t.label) } }
-            let pool = self.dataset.trainingTakes.filter { base.labels.contains($0.label) && !$0.block.hasPrefix("calibrate-") }
+            // D63: never replay nod-confirmed takes (their label is the model's own guess; they cost the CNN ~10 points).
+            let pool = self.dataset.trainingTakes.filter {
+                base.labels.contains($0.label) && !$0.block.hasPrefix("calibrate-") && !$0.block.hasPrefix("confirmed-")
+            }
             var rng = SystemRandomNumberGenerator()
             let replayTakes = Array(pool.shuffled(using: &rng).prefix(150))
             self.calibrationStatus = "Adjusting to your AirPods…"

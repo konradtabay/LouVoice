@@ -750,6 +750,8 @@ Non-word movement (`_none`, each block held out): rejected 75% (43/57), vs 79% (
 
 **Selective answering** (`Decoder.cnnMinConfidence`, still 0, `TODO(team)`): on DEV + XS an ensemble answering only at confidence ≥ 0.6 was right 94% of the time on 49% of takes; ≥ 0.7, 98% on 40%.
 
+**Confirmed takes:** dropping `confirmed-*` takes from CNN training was the single biggest gain (+10 points on DEV). Keeping only the ones a clean model agreed with still hurt (66% vs 70%), so they differ from prompted takes even when the label is right (live capture timing, or nods that weren't meant as a yes). The D55 calibration now leaves them out of its replay batch too. `TODO(team)`: they are still saved as training data when you nod (D15, D26) and the DTW recogniser uses them; consider turning `addConfirmedToTraining` off by default.
+
 **Learning curve:** the same recipe on 25/50/75/100% of the data scored 55/71/73/~78% (DEV + XS). Extrapolated (roughly): 85% needs ~2× today's data, 90% ~5×, 95% ~20×.
 
 **Next (`TODO(team)`):** more practice blocks, in different fits and late/tired sessions, are the clearest lever; re-run `ship.py` after recording them. Rebuild the app (`scripts/build-app.sh`) and recalibrate once.
