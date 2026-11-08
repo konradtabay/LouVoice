@@ -42,6 +42,51 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     let blocks = Set(train.map(\.block)).count
     print("\(train.count) training takes, \(blocks) blocks, \(dataset.testTakes.count) quiz takes")
 
+    // --word-mode: Speak › Word accuracy on isolated takes of "hello can you hear me" (D49, D50).
+    if args.contains("--word-mode") {
+        let words = ContextModel().tokenized.first ?? defaultWords
+        let strong = ContextModel().weight
+        let everything: @Sendable (Take) -> Bool = { _ in true }
+        let isolated: @Sendable (Take) -> Bool = WordModeBenchmark.isIsolated
+        let variants: [WordModeBenchmark.Variant] = [
+            .init(name: "all takes, Strong context, any order", pool: everything, contextWeight: strong, previous: .randomOther),
+            .init(name: "all takes, no context", pool: everything, contextWeight: 0, previous: .none),
+            .init(name: "all takes, Strong context, in phrase order", pool: everything, contextWeight: strong, previous: .inOrder),
+            .init(name: "all takes, Balanced, any order", pool: everything, contextWeight: 0.3, previous: .randomOther),
+            .init(name: "isolated takes only, no context", pool: isolated, contextWeight: 0, previous: .none),
+        ]
+        for r in WordModeBenchmark.run(dataset, words: words, variants: variants) {
+            print(String(format: "%-42@ right %3d/%d = %3.0f%%   wrong %d   refused %d", r.name, r.correct, r.total,
+                         Double(r.correct) / Double(max(r.total, 1)) * 100, r.wrong, r.refused))
+            print("    " + words.map { w in let c = r.perWord[w] ?? (0, 0); return "\(w) \(c.0)/\(c.1)" }.joined(separator: "  "))
+            // "Not sure, say it again" below a margin: how often a spoken word is right vs how often it asks again.
+            for gate in [0.0, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0] {
+                let kept = r.margins.filter { $0.0 >= gate }
+                let right = kept.filter(\.1).count
+                print(String(format: "      margin ≥ %.2f: spoken %3d/%d, right when spoken %3.0f%%, overall right %3.0f%%", gate,
+                             kept.count, r.total, Double(right) / Double(max(kept.count, 1)) * 100, Double(right) / Double(max(r.total, 1)) * 100))
+            }
+        }
+        exit(0)
+    }
+
+    // --export-features <out.json>: the default pipeline's features for every word take (training
+    // and quiz), for training models outside Swift on exactly what the recogniser sees.
+    if let j = args.firstIndex(of: "--export-features"), j + 1 < args.count {
+        let config = PipelineConfig.defaults.features
+        var rows: [[String: Any]] = []
+        for (take, isTest) in dataset.trainingTakes.map({ ($0, false) }) + dataset.testTakes.map({ ($0, true) }) {
+            guard let f = Features.extract(take.samples, config: config) else { continue }
+            let seq = f.sequence
+            rows.append(["id": take.id.uuidString, "label": take.label, "block": take.block, "test": isTest,
+                         "dims": seq.dims, "vectorDims": seq.vectorDims, "values": seq.values])
+        }
+        let out = URL(fileURLWithPath: (args[j + 1] as NSString).expandingTildeInPath)
+        try! JSONSerialization.data(withJSONObject: ["rate": config.rate, "takes": rows]).write(to: out)
+        print("exported \(rows.count) takes to \(out.path)")
+        exit(0)
+    }
+
     func report(_ name: String, _ config: PipelineConfig) {
         guard let r = Tuner.evaluate(train, config: config, permutations: 200) else { print("not enough data"); return }
         print("\n== \(name): \(config.summary)")

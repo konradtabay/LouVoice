@@ -533,3 +533,32 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 **Decision:** Demo mode rejects at score ≥ 0.6 (`SentenceConfig.rejectThreshold`; `TODO(team)`). It shows "No sentence detected — looked like other movement" and plays the reject tone instead of speaking. A strictness slider and an on/off switch are on Decode. The references are rebuilt with each retrain. The live sentence-training score never rejects.
 
 **Trade-off accepted:** About 1 in 15 real sentences is refused ("try again"), in exchange for never speaking a sentence in response to random movement. More mixed-sentence blocks should tighten real sentences' scores and lower that refusal rate.
+
+### D49: Word / sentence mode on the AirPods dot; each mode has a fixed output set (2026-11-07)
+**Request:** A Word / Sentence toggle on the Speak screen. Word mode detects only the single words of "hello can you hear me" for now. Sentence mode outputs "hello can you hear me", "my name is konrad how are you today", or nothing.
+
+**Changes:**
+- **Switching modes:** click the header's AirPods dot (`LiveIndicator`). Green = word mode, purple = sentence mode, with "· Word" / "· Sentence" beside "AirPods on". It's bound to `Decoder.sentenceMode` (same setting as Settings › Speaking) and does nothing while recording or thinking. While the AirPods are off, the dot stays orange and clicking it still opens Signals. (A Word | Sentence switch on Speak was tried first and replaced by this.)
+- **Word mode:** decoding is limited to the trained words of the first expected phrase (`Decoder.wordModeWords`; `_none` is still allowed, so movement is still refused). The Context screen's `activeWords` narrows this further. If fewer than two of those words are trained, word mode falls back to every trained word, so the one-word fallback always works (CLAUDE.md rule 3). `TODO(team)`: widen to all words once the newer words are accurate enough.
+- **Sentence mode on Speak:** always runs with `onlyExpectedPhrases` and `rejectNothing` on (D45, D47), whatever the developer switches on Decode say. The Decode screen keeps its own switches for experiments.
+
+### D50: Word mode on Speak uses no next-word context (2026-11-07). *Amends D38 for word mode.*
+**Request:** Word mode only has the 5 words of "hello can you hear me", so it should be near 95–100%.
+
+**Test** (`LouVoiceCheck --eval … --word-mode`): every isolated take of the 5 words (enrollment and quiz blocks, 330 takes) decoded by a model that never saw its block, restricted to the 5 words plus `_none`, exactly as `Decoder.trigger()` does:
+
+| Setup | Right | Wrong | Refused |
+|---|---|---|---|
+| Strong context, words in any order (**what Speak › Word did**) | 36% | 62% | 2% |
+| Balanced context, any order | 49% | 47% | 4% |
+| **No context, any order (chosen)** | **68%** | 30% | 2% |
+| Strong context, words in phrase order | 98% | 2% | 1% |
+| No context, trained on isolated takes only (no sentence cuts) | 68% | 30% | 2% |
+
+**Findings:**
+- The earlier 94–100% figures (D37, D41) come from the context model when the words follow the phrase. Out of order, Strong context overrides the motion and halves accuracy.
+- Restricting to 5 words doesn't make single words easy: motion alone is 68% (hello 59–62%, you 78–79%).
+- Word takes cut from sentences neither help nor hurt isolated words.
+- A "not sure, say it again" margin gate doesn't reach 95% usefully: margin ≥ 0.2 makes spoken words 90% right but refuses 69% of tries.
+
+**Decision:** The user chose **any order** for word mode. Speak › Word decodes with context weight 0; the Decode screen keeps its context slider. Getting closer to 95% in any order needs a better motion model or more data, not settings.

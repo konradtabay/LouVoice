@@ -11,7 +11,47 @@ struct CaptureSettings: Codable, Hashable {
 
 @MainActor @Observable
 final class AppModel {
+    /// The three tabs the user sees, plus Settings (opened from the gear). TODO(team): "Speak" is the "use" tab.
     enum Screen: String, CaseIterable, Identifiable {
+        case signals = "Signals", train = "Train", speak = "Speak", settings = "Settings"
+        var id: String { rawValue }
+        static let tabs: [Screen] = [.signals, .train, .speak]
+    }
+
+    /// Settings › Advanced: the original full screens, kept intact for caregivers and the team.
+    enum AdvancedPage: String, CaseIterable, Identifiable {
+        case trainingConsole = "Training console", speakingConsole = "Speaking console",
+             signalDetails = "Signal details", accuracy = "Accuracy check", fineTune = "Fine-tune"
+        var id: String { rawValue }
+        var detail: String {
+            switch self {
+            case .trainingConsole: "Every practice option: blocks, quizzes, sentence practice, focus words, live scores."
+            case .speakingConsole: "Every speaking option: phrases, prediction, acceptance limits, active words."
+            case .signalDetails: "Live motion graphs, sample rate and gaps."
+            case .accuracy: "Measure how well LouVoice knows each word."
+            case .fineTune: "Tune the recogniser's settings on recorded practice."
+            }
+        }
+    }
+
+    let hub = MotionHub()
+    let cues = CueService()
+    let stem = StemPress()
+    let voice = VoiceService()
+    @ObservationIgnored private(set) lazy var enrollment = Enrollment(model: self)
+    @ObservationIgnored private(set) lazy var decoder = Decoder(model: self)
+
+    var screen: Screen = .train
+    /// Open Settings sub-page (nil = the simple Settings list).
+    var advancedPage: AdvancedPage?
+    /// Dev mode: the original sidebar UI (five screens, system styling). Toggled by clicking the
+    /// LouVoice logo; "Simple UI" in its sidebar comes back. Remembered between launches.
+    var devMode = UserDefaults.standard.bool(forKey: "devMode") {
+        didSet { UserDefaults.standard.set(devMode, forKey: "devMode") }
+    }
+    var devScreen: DevScreen = .enroll
+
+    enum DevScreen: String, CaseIterable, Identifiable {
         case sensors = "Sensors", enroll = "Enroll", evaluate = "Evaluate", tune = "Tune", decode = "Decode"
         var id: String { rawValue }
         var symbol: String {
@@ -24,15 +64,6 @@ final class AppModel {
             }
         }
     }
-
-    let hub = MotionHub()
-    let cues = CueService()
-    let stem = StemPress()
-    let voice = VoiceService()
-    @ObservationIgnored private(set) lazy var enrollment = Enrollment(model: self)
-    @ObservationIgnored private(set) lazy var decoder = Decoder(model: self)
-
-    var screen: Screen = .enroll
     private(set) var dataset: Dataset
     private(set) var classifier: Classifier?
     /// Recorded whole sentences (scaled features by phrase) for the demo's second vote (D46).
@@ -65,6 +96,9 @@ final class AppModel {
         let simulated = CommandLine.arguments.contains("--smoke")
             || ProcessInfo.processInfo.environment["LOUVOICE_SOURCE"] == "simulator"
         if simulated { hub.source = .simulator }
+        // LOUVOICE_SCREEN=signals|train|speak|settings opens that screen (screenshots, demos).
+        if let raw = ProcessInfo.processInfo.environment["LOUVOICE_SCREEN"],
+           let s = Screen.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) { screen = s }
         dataset = DatasetStore.load(simulated: simulated)
         let isolated = ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] != nil
         config = isolated ? .defaults : (Self.load(PipelineConfig.self, key: Self.configKey) ?? .defaults)
@@ -77,6 +111,7 @@ final class AppModel {
         hub.onSample = { [weak self] s in self?.decoder.ingest(s) }
         stem.onPress = { [weak self] in self?.stemPressed() }
         if CommandLine.arguments.contains("--smoke") { SmokeTest(model: self).run() }
+        if let dir = Snapshot.directory { Snapshot.run(model: self, to: dir) }
         hub.start()
         installKeyMonitor()
         rebuildClassifier()
@@ -261,9 +296,25 @@ final class AppModel {
 
     // MARK: Input
 
+    /// Where Space / the stem press goes: speaking or practising, on the simple tab or its console.
+    private enum KeyTarget { case speak, train, none }
+    private var keyTarget: KeyTarget {
+        if devMode {
+            switch devScreen { case .decode: return .speak; case .enroll: return .train; default: return .none }
+        }
+        return switch (screen, advancedPage) {
+        case (.speak, _), (.settings, .speakingConsole): .speak
+        case (.train, _), (.settings, .trainingConsole): .train
+        default: .none
+        }
+    }
+
     private func stemPressed() {
-        if screen == .decode { decoder.trigger() }
-        else if screen == .enroll { enrollment.continueAfterBreak() }
+        switch keyTarget {
+        case .speak: decoder.trigger()
+        case .train: enrollment.continueAfterBreak()
+        case .none: break
+        }
     }
 
     private func installKeyMonitor() {
@@ -271,11 +322,11 @@ final class AppModel {
             guard let self else { return event }
             if NSApp.keyWindow?.firstResponder is NSText { return event }
             let consumed: Bool = MainActor.assumeIsolated {
-                switch (event.keyCode, self.screen) {
-                case (49, .decode): if !event.isARepeat { self.decoder.trigger() }; return true          // Space
-                case (49, .enroll): self.enrollment.continueAfterBreak(); return true
-                case (16, .decode): self.decoder.confirm(true); return true                               // Y
-                case (45, .decode): self.decoder.confirm(false); return true                              // N
+                switch (event.keyCode, self.keyTarget) {
+                case (49, .speak): if !event.isARepeat { self.decoder.trigger() }; return true            // Space
+                case (49, .train): self.enrollment.continueAfterBreak(); return true
+                case (16, .speak): self.decoder.confirm(true); return true                                // Y
+                case (45, .speak): self.decoder.confirm(false); return true                               // N
                 default: return false
                 }
             }

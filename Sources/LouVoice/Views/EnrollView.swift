@@ -309,8 +309,8 @@ private struct PromptCard: View {
                 Text(model.enrollment.mode == .quiz ? "Quiz complete" : model.enrollment.mode == .sentence ? "Sentence training complete" : "Training complete")
                     .font(.title.weight(.semibold))
                 HStack {
-                    Button("Evaluate") { model.screen = .evaluate; model.runEvaluation() }
-                    Button("Auto-tune") { model.screen = .tune; model.runAutoTune() }
+                    Button("Evaluate") { if model.devMode { model.devScreen = .evaluate } else { model.advancedPage = .accuracy }; model.runEvaluation() }
+                    Button("Auto-tune") { if model.devMode { model.devScreen = .tune } else { model.advancedPage = .fineTune }; model.runAutoTune() }
                 }
                 .buttonStyle(.borderedProminent)
             }

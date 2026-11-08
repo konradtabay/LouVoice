@@ -67,8 +67,27 @@ final class Decoder {
     func expectedNext() -> [(word: String, p: Double)] {
         let ctx = model.config.context
         guard ctx.weight > 0 else { return [] }
-        let vocab = activeWords.isEmpty ? model.words : model.words.filter { activeWords.contains($0) }
+        let allowed = wordModeAllowed
+        let vocab = allowed.map { a in model.words.filter { a.contains($0) } } ?? model.words
         return ctx.expected(after: currentContext, vocabulary: vocab)
+    }
+
+    /// Word mode only decodes the words of the first expected phrase ("hello can you hear me").
+    /// TODO(team): "for now" — widen to every trained word (or both sentences) once single-word
+    /// accuracy on the newer words (my, name, is, konrad, how, are, today) is good enough.
+    var wordModeWords: [String] {
+        let trained = Set(model.words)
+        return (model.config.context.tokenized.first ?? []).filter { trained.contains($0) }
+    }
+
+    /// Words a word-mode decode may output (`_none` is always added by the classifier).
+    /// The Context screen's `activeWords` narrows it further. nil = no restriction
+    /// (only when fewer than two of the phrase's words are trained, so word mode still works).
+    private var wordModeAllowed: Set<String>? {
+        var allowed = Set(wordModeWords)
+        if allowed.count < 2 { allowed = [] }
+        if !activeWords.isEmpty { allowed = allowed.isEmpty ? activeWords : allowed.intersection(activeWords) }
+        return allowed.isEmpty ? nil : allowed
     }
 
     @ObservationIgnored private unowned let model: AppModel
@@ -95,7 +114,7 @@ final class Decoder {
             cues.play(.start)
             var simWord: String?
             if hub.isSimulated {
-                let pool = self.activeWords.isEmpty ? self.model.words : Array(self.activeWords)
+                let pool = self.wordModeAllowed.map { Array($0) } ?? self.model.words
                 simWord = self.simulatedWord ?? pool.randomElement()
                 hub.simulate(simWord.map { .word($0) })
             }
@@ -108,9 +127,14 @@ final class Decoder {
                 return
             }
             if self.rejectForHeadMovement(features, samples: samples) { return }
-            let active = self.activeWords.isEmpty ? nil : self.activeWords
+            let active = self.wordModeAllowed
             let (maxScore, minMargin) = (self.maxScore, self.minMargin)
-            let context = self.model.config.context, previous = self.currentContext
+            var context = self.model.config.context
+            let previous = self.currentContext
+            // Speak › Word: words come in any order, so no next-word context (D50). On recordings,
+            // Strong context out of order scored 36% against 68% for motion alone. The developer
+            // Decode screen keeps its context slider for experiments.
+            if self.model.screen == .speak { context.weight = 0 }
             let (prediction, motionBest) = await Task.detached(priority: .userInitiated) { () -> (Prediction, String?) in
                 let motion = classifier.rank(features.sequence, active: active)
                 let ranked = context.rescore(motion, previous: previous)
@@ -152,7 +176,14 @@ final class Decoder {
     private func triggerSentence() {
         guard phase == .idle || isConfirming, let classifier = model.classifier else { return }
         if isConfirming { finishConfirm(.unconfirmed) }
-        let hub = model.hub, cues = model.cues, config = model.config
+        let hub = model.hub, cues = model.cues
+        var config = model.config
+        // Speak screen: a sentence is always one of the expected phrases in full, or nothing (D45, D47).
+        // The developer Decode screen keeps its own switches for these.
+        if model.screen == .speak {
+            config.sentence.onlyExpectedPhrases = true
+            config.sentence.rejectNothing = true
+        }
         guard let decoder = SentenceDecoder(classifier: classifier, pipeline: config, config: config.sentence) else { return }
         phase = .recording
         Task { [weak self] in

@@ -1,53 +1,164 @@
+import AppKit
 import SwiftUI
 
+/// App shell styled like the landing page header: wordmark left, three tabs centred with an ink
+/// underline on the active one, Settings on the right.
 struct ContentView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        @Bindable var model = model
-        NavigationSplitView {
-            List(AppModel.Screen.allCases, selection: $model.screen) { screen in
-                Label(screen.rawValue, systemImage: screen.symbol).tag(screen)
-            }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
-            .safeAreaInset(edge: .bottom) { SourceFooter().padding(12) }
-        } detail: {
-            VStack(spacing: 0) {
-                if model.isSimulated { SimulatorBanner() }
-                Group {
-                    switch model.screen {
-                    case .sensors: SensorsView()
-                    case .enroll: EnrollView()
-                    case .evaluate: EvaluateView()
-                    case .tune: TuneView()
-                    case .decode: DecodeView()
-                    }
+        Group {
+            if model.devMode { DevModeView() } else { simple }
+        }
+        .onAppear(perform: applyAppearance)
+        .onChange(of: model.devMode) { applyAppearance() }
+    }
+
+    /// The simple UI is light-only like the website; dev mode follows the system (light or dark),
+    /// exactly as the original app did. Set on NSApp because `.preferredColorScheme` sticks on
+    /// macOS after the view that set it goes away.
+    private func applyAppearance() {
+        NSApp?.appearance = model.devMode ? nil : NSAppearance(named: .aqua)
+    }
+
+    private var simple: some View {
+        VStack(spacing: 0) {
+            Header()
+            if model.isSimulated { SimulatorBanner() }
+            Group {
+                switch model.screen {
+                case .signals: SignalsView()
+                case .train: TrainView()
+                case .speak: SpeakView()
+                case .settings: SettingsView()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(PaperBackground())
+        .foregroundStyle(LV.ink)
+        .tint(LV.heart)
+    }
+}
+
+private struct Header: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 0) {
+            // Clicking the logo switches to dev mode (the original UI). TODO(team): hidden on purpose so the patient doesn't hit it.
+            Button { model.devMode = true } label: { Wordmark() }
+                .buttonStyle(.plain)
+                .help("Dev mode")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 48) {
+                ForEach(AppModel.Screen.tabs) { tab in TabLink(tab: tab) }
+            }
+            HStack(spacing: 16) {
+                Spacer()
+                LiveIndicator()
+                Button { open(.settings) } label: {
+                    Label("Settings", systemImage: "gearshape").labelStyle(.titleAndIcon)
+                }
+                .lvButton(model.screen == .settings ? .primary : .outline)
+                .keyboardShortcut(",", modifiers: .command)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 32)
+        .frame(height: 84)
+        .overlay(alignment: .bottom) { Rectangle().fill(LV.ink).frame(height: 1) }
+    }
+
+    private func open(_ screen: AppModel.Screen) {
+        model.advancedPage = nil
+        model.screen = screen
+    }
+}
+
+private struct TabLink: View {
+    @Environment(AppModel.self) private var model
+    var tab: AppModel.Screen
+
+    var body: some View {
+        let active = model.screen == tab
+        Button {
+            model.advancedPage = nil
+            model.screen = tab
+        } label: {
+            Text(tab.rawValue)
+                .font(LV.sans(22, active ? .semibold : .regular))
+                .foregroundStyle(active ? LV.ink : LV.ink.opacity(0.6))
+                .padding(.vertical, 12).padding(.horizontal, 6)
+                .frame(height: 84)
+                .overlay(alignment: .bottom) { if active { Rectangle().fill(LV.ink).frame(height: 3) } }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(active ? .isSelected : [])
+    }
+}
+
+/// Small, always-visible AirPods status: a pulsing dot while motion is streaming.
+/// While connected, clicking it switches what one press says (D49): green = one word,
+/// purple = a whole sentence. While not connected, clicking it opens Signals.
+struct LiveIndicator: View {
+    @Environment(AppModel.self) private var model
+    @State private var pulse = false
+
+    var body: some View {
+        let live = model.hub.status == .streaming
+        let d = model.decoder
+        let sentence = d.sentenceMode
+        let busy = d.phase == .recording || d.phase == .thinking
+        let dot = !live ? LV.warn : sentence ? LV.heart : LV.good
+        let mode = sentence ? "Sentence" : "Word"
+        Button {
+            if live {
+                if !busy { d.sentenceMode.toggle() }
+            } else {
+                model.advancedPage = nil; model.screen = .signals
+            }
+        } label: {
+            HStack(spacing: 8) {
+                ZStack {
+                    if live {
+                        Circle().fill(dot.opacity(0.35)).frame(width: 20, height: 20)
+                            .scaleEffect(pulse ? 1 : 0.5).opacity(pulse ? 0 : 1)
+                    }
+                    Circle().fill(dot).frame(width: 11, height: 11)
+                }
+                .frame(width: 20, height: 20)
+                .animation(.easeOut(duration: 0.2), value: sentence)
+                Text(live ? "AirPods on" : "AirPods off").font(LV.sans(16, .semibold))
+                if live {
+                    Text("· \(mode)").font(LV.sans(16)).foregroundStyle(LV.muted)
+                }
+            }
+            .foregroundStyle(LV.ink)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(live ? "\(mode) mode. Click to switch to \(sentence ? "word" : "sentence") mode." : "AirPods not connected. Click to check.")
+        .accessibilityLabel(live ? "AirPods connected, \(mode.lowercased()) mode" : "AirPods not connected")
+        .accessibilityHint(live ? "Switches between word and sentence mode" : "Opens Signals")
+        .onAppear {
+            withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { pulse = true }
         }
     }
 }
 
-private struct SourceFooter: View {
-    @Environment(AppModel.self) private var model
-
+/// Page heading in the site's display face.
+struct PageTitle: View {
+    var title: String
+    var subtitle: String? = nil
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("Source", selection: Binding(get: { model.hub.source }, set: { model.setSource($0) })) {
-                ForEach(MotionHub.Source.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            HStack(spacing: 6) {
-                StatusDot(ok: model.hub.status == .streaming)
-                Text(model.hub.status == .streaming
-                     ? String(format: "%.0f Hz", model.hub.sampleRate)
-                     : model.hub.status.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(LV.display(54)).foregroundStyle(LV.ink)
+            if let subtitle {
+                Text(subtitle).font(LV.sans(20)).foregroundStyle(LV.ink.opacity(0.8)).frame(maxWidth: 640, alignment: .leading)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
