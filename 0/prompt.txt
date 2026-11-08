@@ -1,0 +1,1 @@
+New round of training is in, have a fantastic idea, almost "predict" what word we want next so if we have similar words it'll rule out and actually give us what makes sense in the order
