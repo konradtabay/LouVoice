@@ -167,7 +167,11 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     // --export-features <out.json>: the default pipeline's features for every word take (training
     // and quiz), for training models outside Swift on exactly what the recogniser sees.
     if let j = args.firstIndex(of: "--export-features"), j + 1 < args.count {
-        let config = PipelineConfig.defaults.features
+        var config = PipelineConfig.defaults.features
+        // --channels arv: accelerometer + rotation + attitude (the word CNN's input since D63).
+        if let c = args.firstIndex(of: "--channels"), c + 1 < args.count, args[c + 1] == "arv" {
+            config.channels = [.acceleration, .rotation, .attitude]
+        }
         var rows: [[String: Any]] = []
         for (take, isTest) in dataset.trainingTakes.map({ ($0, false) }) + dataset.testTakes.map({ ($0, true) }) {
             guard let f = Features.extract(take.samples, config: config) else { continue }

@@ -721,3 +721,37 @@ Clicking outside the list or pressing Escape closes it. The rows that contain it
 **Change:** `AudioOutputs.isSilent(uid)` reads the device's output mute and volume (main and per-channel elements). The Speak aloud menu re-checks whenever it opens: a muted or zero-volume device shows "Muted in macOS" under its name, and the closed button shows "(muted)" after the selected device. The app doesn't change system audio settings itself; unmute in Control Center › Sound.
 
 **Checked:** with the current hardware state, MacBook Pro Speakers → silent, AirPods Pro → not silent.
+
+### D63: Word CNN retrained on accelerometer + late-session weighting, tested on a locked late-night set (2026-11-08). *Replaces the D53 weights.*
+**Request:** Overnight, keep improving the single-word model toward 95%+, with strict held-out evaluation so it can't cheat.
+
+**Evaluation (frozen before any experiment, `scripts/nn/lab/split.json`):**
+- **Locked test:** the last 60 isolated word takes recorded (quiz 00:03, quiz 00:04, calibration 00:53 on 2026-11-08, the late-night fit where live accuracy collapsed in D55). Never trained on or tuned on; every look is logged in `scripts/nn/lab/locked_log.jsonl` (4 looks).
+- **Selection:** DEV (3 other late-night blocks, 52 takes, each held out in turn) plus XS (each daytime session held out entirely, its quiz takes tested, 55 takes).
+- `confirmed-*` takes are never test data (their labels are the model's own guess).
+
+**Result** (2 seeds each):
+
+| Model | DEV | XS | Locked |
+|---|---|---|---|
+| D53 weights' recipe | 59.6% | – | 43.3% |
+| Same, without `confirmed-*` takes | 70.2% | 85.5% | 49.2% |
+| **Shipped: + accelerometer channels, latest-session takes ×8, 5 networks** | **79.8%** | 79.1% | **53.3%** |
+
+Non-word movement (`_none`, each block held out): rejected 75% (43/57), vs 79% (45/57) for the same recipe without the accelerometer and night weighting, a two-take difference.
+
+95% was not reached. About 70 other variants (augmentation, normalisation, architectures, synthetic takes, label cleaning, session adaptation, ensembles, a random search) are listed in `scripts/nn/lab/RESULTS.md`; none beat this by more than noise on DEV + XS. Even with half of a late-night block in training, the other half only reaches ~77%: those takes are mouthed ~40–50% smaller ("you", "hear", "me") and vary more.
+
+**Changes:**
+- `Resources/Models/word_cnn.json`: new weights (`id` d63-…, `channels` acceleration + rotation + attitude, 5 members), trained by `scripts/nn/lab/ship.py` on every isolated word take except `confirmed-*`. Swift and PyTorch agree on all 668 training takes (probabilities within 5e-7).
+- `CNNWordModel` reads `channels` (default rotation + attitude, so older files load as before); the decoder and calibration extract features with `featureConfig`.
+- A saved calibration records the weights' `id` and is rejected by other weights, so Speak asks for a fresh calibration (D55) instead of applying statistics measured for the old network. Self-test added.
+- `LouVoiceCheck --export-features … --channels arv`.
+
+**Selective answering** (`Decoder.cnnMinConfidence`, still 0, `TODO(team)`): on DEV + XS an ensemble answering only at confidence ≥ 0.6 was right 94% of the time on 49% of takes; ≥ 0.7, 98% on 40%.
+
+**Confirmed takes:** dropping `confirmed-*` takes from CNN training was the single biggest gain (+10 points on DEV). Keeping only the ones a clean model agreed with still hurt (66% vs 70%), so they differ from prompted takes even when the label is right (live capture timing, or nods that weren't meant as a yes). The D55 calibration now leaves them out of its replay batch too. `TODO(team)`: they are still saved as training data when you nod (D15, D26) and the DTW recogniser uses them; consider turning `addConfirmedToTraining` off by default.
+
+**Learning curve:** the same recipe on 25/50/75/100% of the data scored 55/71/73/~78% (DEV + XS). Extrapolated (roughly): 85% needs ~2× today's data, 90% ~5×, 95% ~20×.
+
+**Next (`TODO(team)`):** more practice blocks, in different fits and late/tired sessions, are the clearest lever; re-run `ship.py` after recording them. Rebuild the app (`scripts/build-app.sh`) and recalibrate once.

@@ -6,7 +6,7 @@ import Foundation
 ///
 /// Architecture (must match the training script): 4 residual dilated Conv1d(64) + BatchNorm + GELU
 /// layers, masked average + max pooling over time, plus the take length, then one linear layer.
-/// Input: the default pipeline's features (`PipelineConfig.defaults.features`), divided by the
+/// Input: the default pipeline's features with the file's `channels` (`featureConfig`), divided by the
 /// training spread per channel, centred in a fixed window of `T` frames.
 ///
 /// Calibration (D55): `calibrated(calibration:replay:)` adapts a copy to today's earbud fit from a
@@ -15,6 +15,18 @@ import Foundation
 public struct CNNWordModel: Sendable {
     public let labels: [String]
     public let T: Int
+    /// Feature channels the network was trained on (weights file key "channels", e.g. ["acceleration",
+    /// "rotation", "attitude"]). Older files have none: the default pipeline's rotation + attitude.
+    public let channels: FeatureChannels
+    /// The weights file's "id" (nil for files from before D63). A saved calibration records it and is only
+    /// applied to the same weights, so a new model never inherits statistics measured for an old one.
+    public let modelID: String?
+    /// The pipeline settings to extract this network's input with: the defaults, with `channels`.
+    public var featureConfig: FeatureConfig {
+        var c = PipelineConfig.defaults.features
+        c.channels = channels
+        return c
+    }
     var members: [Member]
 
     struct Conv: Sendable {
@@ -54,6 +66,21 @@ public struct CNNWordModel: Sendable {
         else { throw LoadError.badFormat("missing labels / T / members") }
         self.labels = labels
         self.T = T
+        self.modelID = root["id"] as? String
+        if let names = root["channels"] as? [String] {
+            var c: FeatureChannels = []
+            for n in names {
+                switch n {
+                case "acceleration": c.insert(.acceleration)
+                case "rotation": c.insert(.rotation)
+                case "attitude": c.insert(.attitude)
+                default: throw LoadError.badFormat("unknown channel \(n)")
+                }
+            }
+            self.channels = c
+        } else {
+            self.channels = PipelineConfig.defaults.features.channels
+        }
         self.members = try members.map(Self.member)
     }
 
@@ -296,13 +323,16 @@ public struct CNNWordModel: Sendable {
         let ms: [[String: Any]] = members.map { m in
             ["means": m.convs.map(\.mean), "vars": m.convs.map(\.variance), "headW": m.headW, "headB": m.headB]
         }
-        return try JSONSerialization.data(withJSONObject: ["labels": labels, "members": ms])
+        var root: [String: Any] = ["labels": labels, "members": ms]
+        if let modelID { root["model"] = modelID }
+        return try JSONSerialization.data(withJSONObject: root)
     }
 
     /// The model with a saved calibration applied. Throws if it doesn't fit this model.
     public func applying(calibration data: Data) throws -> CNNWordModel {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (root["labels"] as? [String]) == labels, let ms = root["members"] as? [[String: Any]], ms.count == members.count
+              (root["labels"] as? [String]) == labels, let ms = root["members"] as? [[String: Any]], ms.count == members.count,
+              (root["model"] as? String) == modelID
         else { throw LoadError.badFormat("calibration doesn't match the model") }
         var copy = self
         for (i, d) in ms.enumerated() {
