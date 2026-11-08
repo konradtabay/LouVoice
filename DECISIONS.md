@@ -750,4 +750,6 @@ Non-word movement (`_none`, each block held out): rejected 75% (43/57), vs 79% (
 
 **Selective answering** (`Decoder.cnnMinConfidence`, still 0, `TODO(team)`): on DEV + XS an ensemble answering only at confidence ≥ 0.6 was right 94% of the time on 49% of takes; ≥ 0.7, 98% on 40%.
 
-**Next (`TODO(team)`):** more late-night/tired practice blocks in different fits are the clearest lever; re-run `ship.py` after recording them. Rebuild the app (`scripts/build-app.sh`) and recalibrate once.
+**Learning curve:** the same recipe on 25/50/75/100% of the data scored 55/71/73/~78% (DEV + XS). Extrapolated (roughly): 85% needs ~2× today's data, 90% ~5×, 95% ~20×.
+
+**Next (`TODO(team)`):** more practice blocks, in different fits and late/tired sessions, are the clearest lever; re-run `ship.py` after recording them. Rebuild the app (`scripts/build-app.sh`) and recalibrate once.

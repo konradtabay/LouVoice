@@ -11,7 +11,7 @@ def run(item):
     if o.get("setup"): cmd += ["--setup", o["setup"]]
     cmd += o.get("flags", []) + ([] if o.get("noxs") else ["--xs"])
     with open(os.path.join(HERE, "logs", name + ".log"), "w") as fh:
-        subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=HERE)
+        subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd=HERE, env=dict(os.environ, PYTHONHASHSEED="0"))
     last = open(os.path.join(HERE, "logs", name + ".log")).read().strip().splitlines()
     print(last[-1] if last else name + ": no output", flush=True)
 with ThreadPoolExecutor(P) as ex: list(ex.map(run, Q))

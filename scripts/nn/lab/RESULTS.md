@@ -61,6 +61,9 @@ In the app this is `Decoder.cnnMinConfidence` (currently 0, always answers): "No
 - The random search's best configs (80.4 on seeds 0–1) re-tested on seeds 2–3 at 76.6 and 77.1, the same as the shipped recipe (76.2): winner's curse. The shipped model was kept.
 - So the only changes that clearly cleared the noise were dropping `confirmed-*` takes (+10), and the accelerometer channels with late-session weighting (+10 on DEV, +4 on LOCKED).
 
+## Learning curve (how much data 95% would need)
+Same recipe trained on a random 25 / 50 / 75 / 100% of the training takes (DEV + XS combined): 54.7 / 70.6 / 72.9 / ~77.8% (100% = mean of 4 seeds). A power-law fit, error ≈ 22% × (data)^-0.49, extrapolates to roughly **85% at 2×, 90% at 5× and 95% at ~20× today's data** (today ~670 usable takes). Four noisy points, so treat this as an order of magnitude: more recorded practice, in varied fits and late/tired sessions, is the lever, not more modelling.
+
 ## Shipped (D63)
 `ship.py`: accelerometer + rotation + attitude, latest session ×8, 5 networks, every take except `confirmed-*` (locked blocks included, as for any real model). Locked score of the recipe (trained without the locked blocks): **53.3%** (D53 recipe: 43.3%).
 
