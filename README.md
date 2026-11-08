@@ -55,16 +55,7 @@ Today's options are eye-gaze boards, typing, and generic synthetic voices. They'
 
 Everything runs on the Mac. Nothing leaves it unless the user opts in.
 
-## Results
-
-These are measured on real AirPods data from 754 recorded takes, with held-out evaluation. See [DECISIONS.md](DECISIONS.md) (D46) for the full numbers.
-
-| Test | Result | Chance |
-|---|---|---|
-| Demo mode: pick the right sentence (2 trained sentences, 45 real takes, each block held out) | **45 / 45** | 50% |
-| Isolated words, quiz takes (12 words) | **71%** | 8% |
-| Isolated words, whole recording blocks held out (12 words) | **50%** | 8% |
-| Word mode (5 words + no word), late-night blocks held out, D63 CNN | **80%** (locked test: 53%) | 20% |
+## Status
 
 **What this is and isn't.** It's a proof of technology from one user. It isn't open-vocabulary speech yet. The recognizer is personal by design: it learns one person's movements. The next steps are a larger vocabulary, more sessions per user, and testing with people living with ALS.
 
@@ -174,35 +165,21 @@ There's no ML framework at runtime. The forward pass is about 100 lines of plain
 
 ### Calibration: adapting to today's fit (D55)
 
-The biggest real-world error is **earbud fit**. A 10–15° different seat changes every channel, and accuracy fell from 81% offline to 38% live on an evening with a different fit. The re-seat correction and rotation augmentation help, but don't close that gap.
+The biggest real-world error is **earbud fit**. A 10–15° different seat changes every channel, and accuracy fell sharply live on an evening with a different fit. The re-seat correction and rotation augmentation help, but don't close that gap.
 
 So before first use, and whenever you click **Recalibrate**, the app asks you to mouth each word 4 times (about 80 s). Then, for each network:
 1. **BatchNorm statistics** are re-measured on those 20 takes and blended 50/50 with the trained ones, which re-centres the features for today's fit.
 2. **The last layer** (129→6) is retrained in Swift with Adam: 150 steps, learning rate 0.01, on the new takes, plus a 0.5-weighted replay batch of older takes so it doesn't forget.
 
-This takes about 2 s, is saved next to the dataset, and is reloaded at launch. A saved calibration only applies to the weights it was made for, so new weights ask for a fresh one. On that evening's quizzes it raised live accuracy from **38% to 64%**. Sentence mode has a matching calibration that records each demo sentence 3 times (D57).
+This takes about 2 s, is saved next to the dataset, and is reloaded at launch. A saved calibration only applies to the weights it was made for, so new weights ask for a fresh one. Sentence mode has a matching calibration that records each demo sentence 3 times (D57).
 
-### Results so far
+### Limits
 
-All figures are on **held-out recording blocks** (whole sessions the model never saw, with a re-seat in between); details are in [DECISIONS.md](DECISIONS.md) D53, D55 and D63, and `scripts/nn/lab/RESULTS.md`. Word mode chooses between 5 words, so chance is 20%.
-
-| Recogniser (5 words + no-word) | Words right | No-word rejected |
-|---|---|---|
-| DTW, no context | 68% | – |
-| CNN, 6 classes (D53) | 81% | 80% |
-| D53 CNN on quiz takes | 91% (50/55) | – |
-| D53 recipe, late-night held-out blocks (D63 dev / locked) | 60% / 43% | – |
-| **D63 CNN (shipped), late-night held-out blocks (dev / locked)** | **80% / 53%** | – |
-| D63 CNN, daytime sessions held out entirely | 79% | – |
-| Live, different fit, no calibration | 38% | – |
-| Live, different fit, after calibration | 64% | – |
-
-**Limits:**
 - The data comes from one user over a few sessions.
 - Accuracy depends heavily on earbud fit and on how strongly words are mouthed.
 - The model doesn't learn from new practice on its own: retraining is a manual step (below).
-- Late-night, tired mouthing is the weak spot: 53% on the locked late-night test (D63).
-- Full fine-tuning during calibration would add about 7 points, but needs training support in Swift (MPSGraph or MLX).
+- Late-night, tired mouthing is the weak spot (D63).
+- Full fine-tuning during calibration would likely help more, but needs training support in Swift (MPSGraph or MLX).
 
 ### Overnight training run (D63): the experiment loop
 
@@ -223,14 +200,13 @@ On the night of 2026-11-07/08 the word CNN went through an unattended experiment
 
 **4. Loop:** hypothesis → queue → DEV + XS → keep what clears the noise → combine winners → repeat. When the loop got stuck, it stepped back:
 - **Plotting class-average traces**, which ruled out mirrored axes between sessions.
-- **An in-session ceiling test:** even with half of a late-night block in training, the other half reached only ~77%.
+- **An in-session ceiling test:** even with half of a late-night block in training, the other half was still often misread.
 - **A learning curve.**
 
-| Step | DEV | XS | Locked |
-|---|---|---|---|
-| D53 weights' recipe (start of night) | 60% | – | 43% |
-| Drop `confirmed-*` takes from training | 70% | 86% | 49% |
-| + accelerometer channels, latest session weighted 8× (**shipped**, 5 networks) | **80%** | 79% | **53%** |
+**What was kept** (the shipped model, 5 networks):
+- training without `confirmed-*` takes;
+- accelerometer channels;
+- takes from the latest session weighted 8×.
 
 **What didn't beat it** (each within noise or worse):
 - **Augmentation:** larger rotations, physical re-seat simulation, wide gain, weak-mouthing at the sensor noise floor, mixup, time masking.
@@ -238,13 +214,13 @@ On the night of 2026-11-07/08 the word CNN went through an unattended experiment
 - **Architectures:** GRU, transformer, residual SE-CNN, deeper/wider CNNs, MixStyle, prototypical networks, ROCKET, DTW templates, spectral input.
 - **Data:** synthetic DTW-interpolated takes, label cleaning, filtered confirmed takes, other words as extra classes.
 - **Adaptation:** causal recency fine-tuning, AdaBN, fit-matched fine-tuning.
-- **Combinations:** ensembles (best 80.8% combined, but two feature pipelines), SWA, and 191 random hyperparameter configurations. The top configs re-tested on fresh seeds at the shipped model's level.
+- **Combinations:** ensembles (no clear gain, and they need two feature pipelines), SWA, and 191 random hyperparameter configurations. The top configs re-tested on fresh seeds at the shipped model's level.
 
 **What it found:**
-- **The biggest single error was the data.** Nod-confirmed decodes, saved as training data, cost about 10 points.
-- **The limit is now data, not the model.** Late-night takes are mouthed 40–50% smaller and vary a lot. The learning curve (55/71/73/78% at 25/50/75/100% of the data) extrapolates to roughly 85% at 2× today's data, 90% at 5× and 95% at ~20×.
-- **95% is possible when it's allowed to say "not sure".** Answering only at confidence ≥ 0.6–0.7 was right 94–98% of the time on 40–49% of takes (`Decoder.cnnMinConfidence`, still off).
-- **Measurement limit:** with ~107 held-out takes, the standard error is about ±4 points and seeds move results by ~3. Only changes of 5+ points count.
+- **The biggest single error was the data.** Nod-confirmed decodes, saved as training data, hurt the most.
+- **The limit is now data, not the model.** Late-night takes are mouthed much smaller and vary a lot, and the learning curve was still rising with all of today's data: more recorded practice is the lever.
+- **Saying "not sure" trades coverage for correctness.** Answering only above a confidence threshold was right much more often, on fewer takes (`Decoder.cnnMinConfidence`, still off).
+- **Measurement limit:** the held-out sets are small (~107 takes), so only large differences can be trusted.
 
 ### Retraining the model
 
