@@ -117,19 +117,19 @@ Each capture (a beep, then about 2 s of motion: a 0.3 s pre-roll plus a 1.8 s wi
 | Resample | Linear interpolation onto an even **25 Hz** grid; gaps are reported | The sensor clock jitters; 25 Hz scored the same as 50 Hz and is cheaper (D30) |
 | Re-seat correction | Rotate the capture so the **rest gravity** (first 0.3 s) points straight down | Cancels how the earbud happens to sit today (D7) |
 | High-pass 0.8 Hz | Removes posture drift and slow head motion | Keeps the jaw band (D37) |
-| Channels | Rotation rate xyz, attitude change since the first sample (as a rotation vector) xyz, plus the rotation-free magnitudes ‖ω‖ and ‖θ‖. The word CNN also gets user acceleration xyz and ‖a‖ | **8 channels per frame** for DTW (the accelerometer mostly added noise there, D33); **11** for the word CNN, where it helped on small late-night mouthing (D63) |
+| Channels | Rotation rate xyz, attitude change since the first sample (as a rotation vector) xyz, plus the rotation-free magnitudes ‖ω‖ and ‖θ‖. The word CNN also gets user acceleration xyz and ‖a‖ | **8 channels per frame** for DTW (the accelerometer mostly added noise there, D33); **12** for the word CNN, where it helped on small late-night mouthing (D63) |
 | Trim | Smoothed energy (0.2 s window); keep the region above 35% of floor-to-peak, ± 0.08 s | Drops the silent parts of the window (D22) |
 
-The result is a variable-length sequence of 8-dimensional frames (11 for the word CNN). A carefully mouthed single word is typically about 20 frames (0.7–0.9 s after trimming, D43).
+The result is a variable-length sequence of 8-dimensional frames (12 for the word CNN). A carefully mouthed single word is typically about 20 frames (0.7–0.9 s after trimming, D43).
 
 ### The network (`CNNWordModel.swift`, trained by `scripts/nn/lab/ship.py`)
 
 A small **1D convolutional network over time**, with residual connections and growing dilation, so a few layers can see a whole word:
 
 ```
-input  11 ch × 48 frames (1.92 s), each channel ÷ its training std, word centred, zero-padded + mask
+input  12 ch × 48 frames (1.92 s), each channel ÷ its training std, word centred, zero-padded + mask
   │
-  ├─ Conv1d 11→64, k=5, dilation 1 ── BatchNorm ── GELU            (no residual: channel count changes)
+  ├─ Conv1d 12→64, k=5, dilation 1 ── BatchNorm ── GELU            (no residual: channel count changes)
   ├─ Conv1d 64→64, k=5, dilation 1 ── BatchNorm ── GELU ── + skip
   ├─ Conv1d 64→64, k=5, dilation 2 ── BatchNorm ── GELU ── + skip
   └─ Conv1d 64→64, k=3, dilation 4 ── BatchNorm ── GELU ── + skip
