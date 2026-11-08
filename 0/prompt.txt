@@ -1,0 +1,1 @@
+ok great what was the accuracy and lets rebuild to we achieve that 94, for the next training round lets train it on the sentance, and ill be speaking faster/flowing than usual
