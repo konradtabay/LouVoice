@@ -71,3 +71,10 @@ Same recipe trained on a random 25 / 50 / 75 / 100% of the training takes (DEV +
 ## Findings
 - In-session ceiling: training on half of a late-night block (plus everything else) and testing on the other half only reaches ~76–77%. Late-night takes are mouthed smaller ("you", "hear", "me" ~40–50% less motion than daytime) and vary more take to take. The class-average traces are similar to the daytime ones (no mirrored axes), so this is variability, not a systematic shift.
 - DEV and LOCKED disagree strongly (e.g. "can" 100% on DEV, 25–33% on LOCKED): late-night sessions don't transfer well to each other.
+
+## What to do next
+1. **Rebuild and recalibrate once.** `scripts/build-app.sh` (quit LouVoice first: it replaces `build/LouVoice.app`), then Speak asks for a fresh calibration, because the new weights have a new `id`.
+2. **Record more practice, varied on purpose.** The learning curve says ~2× today's data → ~85%, ~5× → ~90%. Most valuable: short blocks (a few takes of each word) after taking the AirPods out and back in, at different times of day, including tired/late sessions, mouthed as small as you'd naturally mouth.
+3. **Retrain.** `scripts/nn/lab/ship.py` (needs the lab venv: `python3 -m venv .venv-nn && .venv-nn/bin/pip install torch numpy scipy`, and `LV_DATA` pointing at a folder with `dataset.snapshot.json` + `features.json` from `LouVoiceCheck --eval <dataset> --export-features <dir>/features.json`). Check it on the frozen split first: `python -c "import harness as H, fast, feats, numpy as np; ..."` as in `locked_log.jsonl`, or extend `split.json` with the new blocks as a fresh locked set.
+4. **Consider "not sure, try again".** `Decoder.cnnMinConfidence` ≥ 0.6–0.7 trades coverage (40–49% of takes answered) for 94–98% right when it answers.
+5. **Consider not training on nod-confirmed decodes** (`addConfirmedToTraining`, D15/D26): they cost the CNN ~10 points.
