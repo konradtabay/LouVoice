@@ -22,13 +22,14 @@ const db = {
       return { rows: [] }
     }
     if (sql.includes("'team-real'")) {
-      return { rows: [{ word: 'hello', attempts: 12, strength: '6.4' }] }
+      return { rows: [{ attempts: 12, strength: '6.4' }] }
     }
     if (sql.includes('FROM word_weekly')) {
+      assert.match(sql, /GROUP BY week/) // averaged across words, never per word
       return {
         rows: [
-          { week: new Date('2026-05-01T00:00:00Z'), word: 'hello', avg_strength: '5.9', accuracy: '0.9' },
-          { week: new Date('2026-05-08T00:00:00Z'), word: 'hello', avg_strength: '5.7', accuracy: '0.85' },
+          { week: new Date('2026-05-01T00:00:00Z'), avg_strength: '5.9', accuracy: '0.9' },
+          { week: new Date('2026-05-08T00:00:00Z'), avg_strength: '5.7', accuracy: '0.85' },
         ],
       }
     }
@@ -105,8 +106,9 @@ test('progress returns numbers and ISO dates', async () => {
   assert.equal(res.status, 200)
   const body = await res.json()
   assert.equal(body.simulated, true)
-  assert.deepEqual(body.rows[0], { week: '2026-05-01T00:00:00.000Z', word: 'hello', strength: 5.9, accuracy: 0.9 })
-  assert.deepEqual(body.real, [{ word: 'hello', attempts: 12, strength: 6.4 }])
+  assert.deepEqual(body.rows[0], { week: '2026-05-01T00:00:00.000Z', strength: 5.9, accuracy: 0.9 })
+  assert.deepEqual(body.real, { attempts: 12, strength: 6.4 })
+  assert.doesNotMatch(JSON.stringify(body), /"word"/) // no vocabulary in the public response
 })
 
 test('export script turns app takes into real-data SQL', async () => {

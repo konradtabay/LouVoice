@@ -131,30 +131,33 @@ export function createApp({ db, distDir, log = (m) => console.error(m) }) {
   async function progress(_req, res) {
     if (!db) return send(res, 503, { ok: false, rows: [] })
     try {
+      // One overall line: averaged across all words, so the public page never lists the vocabulary.
       const { rows } = await db.query(
-        `SELECT week, word, avg_strength, accuracy
+        `SELECT week,
+                sum(avg_strength * attempts) / nullif(sum(attempts), 0) AS avg_strength,
+                sum(accuracy * attempts) / nullif(sum(attempts), 0)     AS accuracy
            FROM word_weekly
           WHERE user_id = 'alex-demo'
-          ORDER BY week, word`,
+          GROUP BY week
+          ORDER BY week`,
       )
-      // Real takes recorded by the team (exported from the Mac app), summarised per word.
+      // Real takes recorded by the team (exported from the Mac app): one overall total.
       const real = await db.query(
-        `SELECT word, sum(attempts)::int AS attempts, avg(avg_strength) AS strength
+        `SELECT sum(attempts)::int AS attempts,
+                sum(avg_strength * attempts) / nullif(sum(attempts), 0) AS strength
            FROM word_weekly
-          WHERE user_id = 'team-real'
-          GROUP BY word
-          ORDER BY word`,
+          WHERE user_id = 'team-real'`,
       )
+      const r0 = real.rows[0]
       return send(res, 200, {
         ok: true,
         simulated: true,
         rows: rows.map((r) => ({
           week: new Date(r.week).toISOString(),
-          word: String(r.word),
           strength: Number(r.avg_strength),
           accuracy: Number(r.accuracy),
         })),
-        real: real.rows.map((r) => ({ word: String(r.word), attempts: Number(r.attempts), strength: Number(r.strength) })),
+        real: r0 && Number(r0.attempts) > 0 ? { attempts: Number(r0.attempts), strength: Number(r0.strength) } : null,
       }, { 'Cache-Control': 'public, max-age=60' })
     } catch (err) {
       log(`progress query failed: ${err?.code ?? ''} ${err?.message ?? err}`)
