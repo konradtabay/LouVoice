@@ -67,7 +67,7 @@ private struct VoiceCard: View {
                         set: { v.voiceID = $0.trimmingCharacters(in: .whitespacesAndNewlines); v.refreshCache(words: model.words) }))
                         .textFieldStyle(LVTextFieldStyle())
                     Button(v.isPreparing ? "Getting words ready…" : "Get all words ready") {
-                        Task { await v.prepare(vocabulary: model.words) }
+                        Task { await v.prepare(vocabulary: model.voiceVocabulary) }
                     }
                     .lvButton(.outline).disabled(!v.isConfigured || v.isPreparing || model.words.isEmpty)
                     if v.isPreparing { ProgressBar(value: v.prepareProgress) }
@@ -93,11 +93,33 @@ private struct SpeakingCard: View {
                 Eyebrow(text: "Each time I press start, I say")
                 LVChoice(options: [(true, "A whole sentence"), (false, "One word")], selection: $d.sentenceMode)
             }
-            Toggle("Speak aloud", isOn: $d.speakResult).toggleStyle(LVToggleStyle())
+            HStack {
+                Text("Speak aloud").font(LV.body)
+                Spacer()
+                SpeakAloudMenu(showsTitle: false)
+            }
             Toggle("AirPod stem turns speaking aloud on and off", isOn: Binding(
                 get: { model.stem.isEnabled }, set: { model.stem.setWanted($0) }))
                 .toggleStyle(LVToggleStyle())
             Toggle("Keep learning from words I say \"yes\" to", isOn: $d.addConfirmedToTraining).toggleStyle(LVToggleStyle())
+            // D55: calibration of the word model to how the AirPods sit.
+            if model.wordCNNBase != nil {
+                HStack(spacing: 12) {
+                    StatusBadge(tone: model.calibratedAt == nil ? .neutral : .good,
+                                text: model.calibratedAt.map { "Calibrated " + $0.formatted(date: .abbreviated, time: .shortened) }
+                                    ?? "Not calibrated")
+                    Spacer()
+                    Button("Recalibrate") {
+                        model.resetCalibration()
+                        model.advancedPage = nil
+                        model.screen = .speak
+                    }
+                    .lvButton(.outline)
+                    .disabled(model.isCalibrating || model.enrollment.isRunning)
+                }
+                Text("If words or sentences start coming out wrong, recalibrate. Speak asks again: about 80 seconds for words, a minute for sentences.")
+                    .font(LV.small).foregroundStyle(LV.muted)
+            }
         }
     }
 }

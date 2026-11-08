@@ -165,7 +165,7 @@ struct ProgressBar: View {
 // MARK: Prompt
 
 /// The big card that tells the user what to do right now.
-private struct TrainPrompt: View {
+struct TrainPrompt: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {

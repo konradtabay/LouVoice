@@ -124,7 +124,7 @@ struct DecodeView: View {
                     Text(String(format: "Min margin: %.2f", d.minMargin))
                     Slider(value: $d.minMargin, in: 0...0.3)
                 }
-                Toggle("Single words: use the CNN (D51)", isOn: Binding(get: { model.useWordCNN }, set: { model.useWordCNN = $0 }))
+                Toggle("Single words: use the CNN (D53)", isOn: Binding(get: { model.useWordCNN }, set: { model.useWordCNN = $0 }))
                     .disabled(model.wordCNN == nil)
                 Text(model.wordCNN.map { "CNN knows: " + $0.labels.map(displayLabel).joined(separator: ", ") + ". Other words fall back to DTW." }
                      ?? "No CNN weights found (Resources/Models/word_cnn.json).")

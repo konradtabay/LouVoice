@@ -131,7 +131,7 @@ final class Decoder {
             }
             if self.rejectForHeadMovement(features, samples: samples) { return }
             let active = self.wordModeAllowed
-            // D51: the CNN decides single words when it knows every word that may come out.
+            // D53: the CNN decides single words when it knows every word that may come out.
             // Otherwise (e.g. a newly taught word) the DTW classifier below is used, as before.
             if let cnn = self.cnnForWordMode(active: active),
                let cnnFeatures = Features.extract(samples, config: PipelineConfig.defaults.features) {
@@ -166,7 +166,7 @@ final class Decoder {
         }
     }
 
-    /// Single-word CNN to use for this decode, or nil to use DTW (D51).
+    /// Single-word CNN to use for this decode, or nil to use DTW (D53).
     private func cnnForWordMode(active: Set<String>?) -> CNNWordModel? {
         // Trained on real AirPods takes only: the simulator's synthetic motion keeps using DTW.
         guard model.useWordCNN, !model.isSimulated, let cnn = model.wordCNN else { return nil }
@@ -227,6 +227,8 @@ final class Decoder {
         if model.screen == .speak {
             config.sentence.onlyExpectedPhrases = true
             config.sentence.rejectNothing = true
+            // Both demo sentences are always possible on Speak (D56).
+            config.context.phrases = AppModel.speakPhrases(config.context.phrases)
         }
         guard let decoder = SentenceDecoder(classifier: classifier, pipeline: config, config: config.sentence) else { return }
         phase = .recording

@@ -77,9 +77,15 @@ final class AppModel {
     }
     private(set) var dataset: Dataset
     private(set) var classifier: Classifier?
-    /// Single-word CNN (D51), shipped as Resources/Models/word_cnn.json. nil = file missing or
+    /// Single-word CNN (D53), shipped as Resources/Models/word_cnn.json. nil = file missing or
     /// unreadable; word mode then uses the DTW classifier as before.
-    let wordCNN: CNNWordModel? = AppModel.loadWordCNN()
+    /// The shipped weights; `wordCNN` is what decoding uses (with this Mac's calibration, D55).
+    let wordCNNBase: CNNWordModel? = AppModel.loadWordCNN()
+    private(set) var wordCNN: CNNWordModel?
+    /// When the saved calibration was made; nil = not calibrated.
+    private(set) var calibratedAt: Date?
+    private(set) var isCalibrating = false
+    private(set) var calibrationStatus = ""
     /// Developer switch (Decode console): use the CNN for single words when it knows every allowed word.
     var useWordCNN = true
     /// Recorded whole sentences (scaled features by phrase) for the demo's second vote (D46).
@@ -119,6 +125,8 @@ final class AppModel {
         let isolated = ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] != nil
         config = isolated ? .defaults : (Self.load(PipelineConfig.self, key: Self.configKey) ?? .defaults)
         capture = isolated ? CaptureSettings() : (Self.load(CaptureSettings.self, key: Self.captureKey) ?? CaptureSettings())
+        wordCNN = wordCNNBase
+        loadCalibration()
     }
 
     func start() {
@@ -147,7 +155,7 @@ final class AppModel {
         installKeyMonitor()
         rebuildClassifier()
         voice.refreshCache(words: words)
-        if voice.isConfigured { Task { await voice.prepare(words: words) } }
+        if voice.isConfigured { Task { await voice.prepare(words: voiceVocabulary) } }
     }
 
     var isSimulated: Bool { hub.isSimulated }
@@ -187,6 +195,20 @@ final class AppModel {
     // MARK: Dataset
 
     var words: [String] { dataset.vocabulary }
+    /// Everything worth caching in the user's voice: every word plus every expected phrase as one
+    /// clip, so a decoded sentence plays as a whole sentence instantly (D56).
+    var voiceVocabulary: [String] { words + Self.speakPhrases(config.context.phrases) }
+
+    /// The phrases Speak's sentence mode can say. Both demo sentences are always included (D56),
+    /// whatever the phrase list has been edited to in dev mode.
+    static func speakPhrases(_ configured: [String]) -> [String] {
+        var out: [String] = []
+        for p in ContextModel().phrases + configured {
+            let t = p.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            if !t.isEmpty, !out.contains(t) { out.append(t) }
+        }
+        return out
+    }
 
     func features(for take: Take) -> SegmentFeatures? {
         if let f = featureCache[take.id] { return f }
@@ -223,7 +245,7 @@ final class AppModel {
         dataset.vocabulary.append(word)
         DatasetStore.save(dataset, simulated: isSimulated)
         // New words get their voice audio generated right away (PRD: cache at enrollment).
-        if voice.isConfigured { Task { await voice.prepare(words: words) } }
+        if voice.isConfigured { Task { await voice.prepare(words: voiceVocabulary) } }
     }
 
     func removeWord(_ word: String) {
@@ -333,6 +355,7 @@ final class AppModel {
         if devMode {
             switch devScreen { case .decode: return .speak; case .enroll: return .train; default: return .none }
         }
+        if isCalibrating { return .train }
         return switch (screen, advancedPage) {
         case (.speak, _), (.settings, .speakingConsole): .speak
         case (.train, _), (.settings, .trainingConsole): .train
@@ -362,6 +385,113 @@ final class AppModel {
             }
             return consumed ? nil : event
         }
+    }
+
+    // MARK: Word CNN calibration (D55)
+
+    static let calibrationReps = 4
+    private static var calibrationURL: URL { DatasetStore.directory.appending(path: "word_cnn_calibration.json") }
+
+    /// Word mode on real AirPods with no calibration yet: Speak asks for one first.
+    var needsCalibration: Bool {
+        wordCNNBase != nil && calibratedAt == nil && !isSimulated && !decoder.sentenceMode && useWordCNN
+    }
+
+    // MARK: Sentence calibration (D57)
+
+    /// Each Speak sentence recorded this many times in a sentence calibration.
+    static let sentenceCalibrationReps = 3
+    private static var sentenceCalibrationURL: URL { DatasetStore.directory.appending(path: "sentence_calibration.json") }
+    /// When the sentences were last recorded in the current fit; nil = never.
+    private(set) var sentenceCalibratedAt: Date? = AppModel.loadSentenceCalibrationDate()
+
+    private static func loadSentenceCalibrationDate() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: sentenceCalibrationURL.path))?[.modificationDate] as? Date
+    }
+
+    /// Sentence mode on real AirPods, never calibrated: Speak asks to record each sentence first.
+    var needsSentenceCalibration: Bool {
+        sentenceCalibratedAt == nil && !isSimulated && decoder.sentenceMode && classifier != nil
+    }
+
+    /// Records each Speak sentence `sentenceCalibrationReps` times (full length, shuffled). They become
+    /// sentence references in today's fit (and are cut into word takes, as in sentence training).
+    func startSentenceCalibration() {
+        guard !isCalibrating, !enrollment.isRunning, classifier != nil else { return }
+        let phrases = Self.speakPhrases(config.context.phrases)
+        isCalibrating = true
+        calibrationStatus = ""
+        enrollment.startSentences(phrases: phrases, reps: Self.sentenceCalibrationReps * phrases.count, blocks: 1, balanced: true)
+        Task { [weak self] in
+            while self?.enrollment.isRunning == true { try? await Task.sleep(for: .milliseconds(200)) }
+            guard let self else { return }
+            if self.enrollment.phase == .finished {
+                // Sentence takes don't retrain on their own; rebuild so the new references are used.
+                self.rebuildClassifier()
+                try? Data("{}".utf8).write(to: Self.sentenceCalibrationURL, options: .atomic)
+                self.sentenceCalibratedAt = Date()
+            }
+            self.isCalibrating = false
+        }
+    }
+
+    private func loadCalibration() {
+        guard let base = wordCNNBase, let data = try? Data(contentsOf: Self.calibrationURL) else { return }
+        do {
+            wordCNN = try base.applying(calibration: data)
+            calibratedAt = (try? FileManager.default.attributesOfItem(atPath: Self.calibrationURL.path))?[.modificationDate] as? Date
+        } catch {
+            print("calibration not loaded: \(error)")
+        }
+    }
+
+    /// Records `calibrationReps` takes of each word-mode word (no quiz, no extras), adapts the CNN
+    /// to them, and saves the result. The takes are kept as training data.
+    func startCalibration() {
+        guard let base = wordCNNBase, !isCalibrating, !enrollment.isRunning else { return }
+        let words = decoder.wordModeWords.filter { base.labels.contains($0) }
+        guard !words.isEmpty else { return }
+        let started = Date()
+        isCalibrating = true
+        calibrationStatus = ""
+        enrollment.start(words: words, reps: Self.calibrationReps, blocks: 1, noisePerBlock: 0, prefix: "calibrate", plain: true)
+        Task { [weak self] in
+            while self?.enrollment.isRunning == true { try? await Task.sleep(for: .milliseconds(200)) }
+            guard let self else { return }
+            guard self.enrollment.phase == .finished else {   // stopped part-way
+                self.isCalibrating = false
+                return
+            }
+            let features = PipelineConfig.defaults.features
+            let calib = self.dataset.takes.filter { $0.block.hasPrefix("calibrate-") && $0.createdAt >= started }
+                .compactMap { t in Features.extract(t.samples, config: features).map { ($0.sequence, t.label) } }
+            let pool = self.dataset.trainingTakes.filter { base.labels.contains($0.label) && !$0.block.hasPrefix("calibrate-") }
+            var rng = SystemRandomNumberGenerator()
+            let replayTakes = Array(pool.shuffled(using: &rng).prefix(150))
+            self.calibrationStatus = "Adjusting to your AirPods…"
+            let adapted = await Task.detached(priority: .userInitiated) { () -> CNNWordModel in
+                let replay = replayTakes.compactMap { t in Features.extract(t.samples, config: features).map { ($0.sequence, t.label) } }
+                return base.calibrated(calibration: calib, replay: replay)
+            }.value
+            do {
+                try adapted.calibrationData().write(to: Self.calibrationURL, options: .atomic)
+            } catch {
+                print("calibration not saved: \(error)")
+            }
+            self.wordCNN = adapted
+            self.calibratedAt = Date()
+            self.calibrationStatus = ""
+            self.isCalibrating = false
+        }
+    }
+
+    /// Back to the shipped model, and forget the sentence calibration; Speak asks again (word and sentence mode).
+    func resetCalibration() {
+        try? FileManager.default.removeItem(at: Self.calibrationURL)
+        wordCNN = wordCNNBase
+        calibratedAt = nil
+        try? FileManager.default.removeItem(at: Self.sentenceCalibrationURL)
+        sentenceCalibratedAt = nil
     }
 
     // MARK: Word CNN

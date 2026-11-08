@@ -35,7 +35,7 @@ struct VoiceSettingsView: View {
 
             HStack {
                 Button(v.isPreparing ? "Preparing…" : "Prepare voice") {
-                    Task { await v.prepare(vocabulary: model.words) }
+                    Task { await v.prepare(vocabulary: model.voiceVocabulary) }
                 }
                 .disabled(!v.isConfigured || v.isPreparing || model.words.isEmpty)
                 Button("Test") { Task { await v.speak(Self.testPhrase) } }

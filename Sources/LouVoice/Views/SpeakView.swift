@@ -9,17 +9,28 @@ struct SpeakView: View {
     var body: some View {
         @Bindable var d = model.decoder
         VStack(spacing: 24) {
-            HStack {
+            HStack(spacing: 16) {
                 Spacer()
-                Toggle(isOn: $d.speakResult) {
-                    Label("Speak aloud", systemImage: d.speakResult ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                        .font(LV.sans(18, .semibold))
+                // D55/D58: start a fresh calibration from here (Settings › Speaking has one too).
+                if model.wordCNNBase != nil {
+                    Button {
+                        model.resetCalibration()
+                        model.startCalibration()
+                    } label: { Label("Recalibrate", systemImage: "arrow.triangle.2.circlepath") }
+                    .lvButton(.outline)
+                    .fixedSize()
+                    .disabled(model.isCalibrating || model.enrollment.isRunning || d.phase != .idle)
+                    .help(model.calibratedAt.map { "Last calibrated " + $0.formatted(date: .abbreviated, time: .shortened) + ". About 80 seconds." }
+                          ?? "Fit LouVoice to how your AirPods sit. About 80 seconds.")
                 }
-                .toggleStyle(LVToggleStyle())
-                .fixedSize()
-                .help("Off: your words are shown on screen but not spoken. Press an AirPod stem to switch.")
+                SpeakAloudMenu()
             }
-            SpeakCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+            // D55: the first time Speak is used in word mode, a short calibration comes first.
+            if model.needsCalibration || model.needsSentenceCalibration || model.isCalibrating {
+                CalibrationCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                SpeakCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
             HStack(alignment: .bottom, spacing: 24) {
                 LVCard {
                     HStack(alignment: .top, spacing: 20) {
@@ -40,6 +51,52 @@ struct SpeakView: View {
             }
         }
         .padding(40)
+    }
+}
+
+/// One-time calibration: mouth each word a few times so the word model fits how the AirPods sit.
+private struct CalibrationCard: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let e = model.enrollment
+        if model.isCalibrating && e.isRunning {
+            VStack(spacing: 16) {
+                TrainPrompt().frame(maxWidth: .infinity, maxHeight: .infinity)
+                HStack(spacing: 16) {
+                    ProgressBar(value: Double(e.completed) / Double(max(e.total, 1)))
+                    Text("\(e.completed) of \(e.total)").font(LV.body).foregroundStyle(LV.muted).monospacedDigit()
+                    Button("Stop") { e.stop() }.lvButton(.outline)
+                }
+            }
+        } else {
+            VStack(spacing: 22) {
+                let sentences = model.decoder.sentenceMode
+                Eyebrow(text: "One-time setup")
+                Text(model.isCalibrating ? "Adjusting to your AirPods…" : sentences ? "Quick sentence calibration" : "Quick calibration")
+                    .font(LV.display(60))
+                if model.isCalibrating {
+                    ProgressView().controlSize(.large).tint(LV.heart)
+                } else {
+                    Text(sentences
+                         ? "Mouth each sentence \(AppModel.sentenceCalibrationReps) times so LouVoice fits how your AirPods sit. About a minute."
+                         : "Mouth each word \(AppModel.calibrationReps) times so LouVoice fits how your AirPods sit. About 80 seconds.")
+                        .font(LV.sans(24)).multilineTextAlignment(.center).frame(maxWidth: 640)
+                    Button {
+                        if sentences { model.startSentenceCalibration() } else { model.startCalibration() }
+                    } label: { Label("Start calibration", systemImage: "play.fill") }
+                        .lvButton(.primary, .huge)
+                        .disabled(model.hub.status != .streaming || e.isRunning)
+                    if model.hub.status != .streaming {
+                        Text("Connect your AirPods first.").font(LV.body).foregroundStyle(LV.warn)
+                    }
+                }
+            }
+            .padding(40)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(LV.card)
+            .overlay(Rectangle().strokeBorder(LV.ink, lineWidth: 1))
+        }
     }
 }
 

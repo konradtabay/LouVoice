@@ -17,7 +17,7 @@ cp "$BIN" "$APP/Contents/MacOS/LouVoice"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 # Geist Sans + Geist Serif Square, the landing page fonts (registered at launch by LV.registerFonts).
 cp -R Resources/Fonts "$APP/Contents/Resources/Fonts"
-# Single-word CNN weights (D51), loaded at launch by AppModel.loadWordCNN.
+# Single-word CNN weights (D53), loaded at launch by AppModel.loadWordCNN.
 [ -d Resources/Models ] && cp -R Resources/Models "$APP/Contents/Resources/Models"
 # App icon: the website favicon mark on a cream rounded square (Resources/AppIcon.icns).
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"

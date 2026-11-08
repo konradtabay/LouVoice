@@ -26,6 +26,14 @@ final class VoiceService {
     }
 
     var settings: Settings { didSet { saveSettings() } }
+    /// Where spoken words play (D58): an output device UID, or nil for the system default.
+    /// Remembered across launches. If that device is disconnected, the system default is used.
+    var outputDeviceUID: String? {
+        didSet { if !isolated { UserDefaults.standard.set(outputDeviceUID, forKey: Self.outputKey) } }
+    }
+    static let outputKey = "speakOutputDevice"
+    /// The chosen device if it's connected right now, else nil (system default).
+    private var routeUID: String? { outputDeviceUID.flatMap { AudioOutputs.isConnected($0) ? $0 : nil } }
     /// The ElevenLabs voice clone ID (UserDefaults; not secret).
     var voiceID: String { didSet { saveVoiceID() } }
     private(set) var cachedWords: Set<String> = []
@@ -52,6 +60,7 @@ final class VoiceService {
         if !isolated, let data = UserDefaults.standard.data(forKey: Self.settingsKey),
            let s = try? JSONDecoder().decode(Settings.self, from: data) { settings = s } else { settings = Settings() }
         voiceID = isolated ? "" : (UserDefaults.standard.string(forKey: Self.voiceIDKey) ?? "")
+        outputDeviceUID = isolated ? nil : UserDefaults.standard.string(forKey: Self.outputKey)
     }
 
     // MARK: Key (Keychain, or ELEVENLABS_API_KEY for development; never in the bundle or the repo)
@@ -184,27 +193,36 @@ final class VoiceService {
         return finish(text, source, start, played: true)
     }
 
-    /// A sentence: the cached word clips back to back (fetching any missing ones). If any word
-    /// can't be voiced, the sentence is shown as text only.
+    /// A sentence, spoken as one ElevenLabs clip so it flows naturally (D56): cached if it was
+    /// prepared (the expected phrases are), otherwise fetched live and cached. Only if that fails
+    /// are the cached single-word clips played back to back; if a word can't be voiced either,
+    /// the sentence is shown as text only.
     @discardableResult
     func speak(words: [String]) async -> (source: Source, seconds: Double) {
         let start = Date()
         let text = words.joined(separator: " ")
         lastTextOnly = nil
         guard settings.enabled, isConfigured else { return speakSystem(text, start) }
-        var urls: [URL] = []
         var source = Source.cache
+        var whole = cacheURL(text).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        if whole == nil {
+            source = .live
+            whole = await fetch(text)
+        }
+        if let whole, play(whole) { return finish(text, source, start, played: true) }
+        // Fallback: word clips back to back.
+        var urls: [URL] = []
         for w in words {
             if let u = cacheURL(w), FileManager.default.fileExists(atPath: u.path) { urls.append(u); continue }
-            source = .live
             guard let u = await fetch(w) else { return finish(text, .textOnly, start, played: false) }
             cachedWords.insert(w)
             urls.append(u)
         }
         let queue = AVQueuePlayer(items: urls.map { AVPlayerItem(url: $0) })
+        queue.audioOutputDeviceUniqueID = routeUID
         queue.play()
         sequencePlayer = queue
-        return finish(text, source, start, played: true)
+        return finish(text, .live, start, played: true)
     }
 
     private func finish(_ text: String, _ source: Source, _ start: Date, played: Bool) -> (source: Source, seconds: Double) {
@@ -223,13 +241,50 @@ final class VoiceService {
         fallback.stopSpeaking(at: .immediate)
         let u = AVSpeechUtterance(string: text)
         u.rate = 0.45
-        fallback.speak(u)
+        if let uid = routeUID {
+            // AVSpeechSynthesizer can't pick a device, so render the words to a short file and play
+            // that on the chosen device. Adds the render time (~0.1–0.3 s for a word or sentence).
+            renderAndPlay(u, on: uid)
+        } else {
+            fallback.speak(u)
+        }
         return finish(text, .system, start, played: true)
     }
 
-    private func play(_ url: URL) -> Bool {
+    @ObservationIgnored private var renderer: AVSpeechSynthesizer?
+    @ObservationIgnored private var renderFile: AVAudioFile?
+
+    private func renderAndPlay(_ utterance: AVSpeechUtterance, on uid: String) {
+        let synth = AVSpeechSynthesizer()
+        renderer = synth
+        renderFile = nil
+        let url = FileManager.default.temporaryDirectory.appending(path: "louvoice-system-voice.caf")
+        try? FileManager.default.removeItem(at: url)
+        synth.write(utterance) { [weak self] buffer in
+            guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.renderer === synth else { return }
+                    if pcm.frameLength == 0 {           // end of speech
+                        self.renderFile = nil             // closes the file
+                        self.renderer = nil
+                        _ = self.play(url, keepFile: true)
+                        return
+                    }
+                    if self.renderFile == nil {
+                        self.renderFile = try? AVAudioFile(forWriting: url, settings: pcm.format.settings,
+                                                           commonFormat: pcm.format.commonFormat, interleaved: pcm.format.isInterleaved)
+                    }
+                    try? self.renderFile?.write(from: pcm)
+                }
+            }
+        }
+    }
+
+    private func play(_ url: URL, keepFile: Bool = false) -> Bool {
         do {
             let p = try AVAudioPlayer(contentsOf: url)
+            p.currentDevice = routeUID
             p.prepareToPlay()
             guard p.play() else { return false }
             player = p
@@ -237,7 +292,7 @@ final class VoiceService {
         } catch {
             lastError = "Playback failed: \(error.localizedDescription)"
             // A corrupt cache file would fail forever; remove it so the next call refetches.
-            try? FileManager.default.removeItem(at: url)
+            if !keepFile { try? FileManager.default.removeItem(at: url) }
             return false
         }
     }

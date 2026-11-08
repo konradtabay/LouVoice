@@ -26,7 +26,7 @@ if args.contains("--sim-eval") {
 }
 // --eval <dataset.json> [--tune]: honest evaluation of recorded takes, optionally auto-tuned.
 // --cnn-probs <weights.json> <features.json> <out.json>: Swift CNN probabilities for every exported
-// take, to check the Swift forward pass against the Python one (D51).
+// take, to check the Swift forward pass against the Python one (D53).
 if let i = args.firstIndex(of: "--cnn-probs"), i + 3 < args.count {
     let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
     let model = try! CNNWordModel(contentsOf: path(args[i + 1]))
@@ -43,6 +43,81 @@ if let i = args.firstIndex(of: "--cnn-probs"), i + 3 < args.count {
                  Date().timeIntervalSince(start) / Double(max(out.count, 1)) * 1000))
     exit(0)
 }
+
+// --calibration-sim <weights.json> <features.json> [k]: D55 in Swift. For every ordered pair of
+// tonight's quizzes, calibrate on the first k takes per word of one and test on all of the other.
+if let i = args.firstIndex(of: "--calibration-sim"), i + 2 < args.count {
+    let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
+    let model = try! CNNWordModel(contentsOf: path(args[i + 1]))
+    let k = i + 3 < args.count ? Int(args[i + 3]) ?? 4 : 4
+    let root = try! JSONSerialization.jsonObject(with: Data(contentsOf: path(args[i + 2]))) as! [String: Any]
+    struct Row { var seq: FeatureSequence; var label: String; var block: String; var test: Bool }
+    let rows: [Row] = (root["takes"] as! [[String: Any]]).compactMap { t in
+        let seq = FeatureSequence(values: (t["values"] as! [NSNumber]).map(\.doubleValue), dims: t["dims"] as! Int,
+                                  vectorDims: t["vectorDims"] as? Int)
+        let label = t["label"] as! String
+        guard seq.count >= 4, model.labels.contains(label) else { return nil }
+        return Row(seq: seq, label: label, block: t["block"] as! String, test: t["test"] as! Bool)
+    }
+    let quizzes = Set(rows.filter { $0.block.hasPrefix("quiz-") && $0.block >= "quiz-20261107-23" }.map(\.block)).sorted()
+    var rng = SeededRNG(seed: 0)
+    let replay = Array(rows.filter { !$0.test }.shuffled(using: &rng).prefix(150)).map { ($0.seq, $0.label) }
+    let words = model.labels.filter { $0 != noneLabel }
+    var base = (0, 0), cal = (0, 0)
+    var perWord: [String: (Int, Int, Int)] = [:]
+    let start = Date()
+    for a in quizzes { for b in quizzes where b != a {
+        let qa = rows.filter { $0.block == a }, qb = rows.filter { $0.block == b }
+        let calib = words.flatMap { w in qa.filter { $0.label == w }.prefix(k).map { ($0.seq, $0.label) } }
+        let adapted = model.calibrated(calibration: calib, replay: replay)
+        for t in qb {
+            let p0 = model.rank(t.seq).first?.label == t.label, p1 = adapted.rank(t.seq).first?.label == t.label
+            base.0 += p0 ? 1 : 0; cal.0 += p1 ? 1 : 0; base.1 += 1; cal.1 += 1
+            var c = perWord[t.label] ?? (0, 0, 0); c.0 += p0 ? 1 : 0; c.1 += p1 ? 1 : 0; c.2 += 1; perWord[t.label] = c
+        }
+    } }
+    print("quizzes: \(quizzes.joined(separator: ", ")); \(k) calibration takes per word; \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
+    print("not calibrated: \(base.0)/\(base.1)   calibrated: \(cal.0)/\(cal.1)")
+    print(words.map { w in let c = perWord[w] ?? (0, 0, 0); return "\(w) \(c.0)→\(c.1)/\(c.2)" }.joined(separator: "  "))
+    exit(0)
+}
+
+// --word-check <old.json> <new.json> [weights.json]: every word-mode take (5 words + _none) that is in
+// new.json but not old.json, decoded by DTW trained on old.json's training takes and by the CNN —
+// the honest live check for D53. Labels of "confirmed" takes are what was accepted, not ground truth.
+if let i = args.firstIndex(of: "--word-check"), i + 2 < args.count {
+    let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
+    let load = { (s: String) in try! JSONDecoder().decode(Dataset.self, from: Data(contentsOf: path(s))) }
+    let old = load(args[i + 1]), new = load(args[i + 2])
+    let cnn = try! CNNWordModel(contentsOf: path(i + 3 < args.count && !args[i + 3].hasPrefix("--") ? args[i + 3] : "Resources/Models/word_cnn.json"))
+    let words = ContextModel().tokenized.first ?? []
+    let allowed = Set(words)
+    let config = PipelineConfig.defaults
+    let train = old.trainingTakes.map(Tuner.RawTake.init)
+    let clf = Classifier(training: TrainingSet.build(train, config: config), config: config.classifier)!
+    let oldIDs = Set(old.takes.map(\.id))
+    let fresh = new.takes.filter { !oldIDs.contains($0.id) && !$0.isSentence && (allowed.contains($0.label) || $0.label == noneLabel) }
+    var dtwRight = 0, cnnRight = 0
+    var cnnPicks: [String: Int] = [:], dtwPicks: [String: Int] = [:]
+    print("\(fresh.count) new word-mode takes. label | DTW | CNN (top 3 probabilities)")
+    for t in fresh.sorted(by: { $0.createdAt < $1.createdAt }) {
+        guard let fd = Features.extract(t.samples, config: config.features) else { print("\(t.label): no features"); continue }
+        let d = clf.rank(fd.sequence, active: allowed).first?.label ?? "-"
+        let ranked = cnn.rank(fd.sequence, allowed: allowed.union([noneLabel]))
+        let c = ranked.first?.label ?? "-"
+        dtwRight += d == t.label ? 1 : 0; cnnRight += c == t.label ? 1 : 0
+        dtwPicks[d, default: 0] += 1; cnnPicks[c, default: 0] += 1
+        let top = ranked.prefix(3).map { String(format: "%@ %.2f", displayLabel($0.label), 1 - $0.score) }.joined(separator: ", ")
+        print(String(format: "%@ %-8@ | %-8@ | %-8@ (%@)", t.block.prefix(9) == "confirmed" ? "accepted" : "prompted",
+                     displayLabel(t.label), displayLabel(d), displayLabel(c), top))
+    }
+    print("agree with label: DTW \(dtwRight)/\(fresh.count), CNN \(cnnRight)/\(fresh.count)")
+    print("DTW answers:", dtwPicks.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    print("CNN answers:", cnnPicks.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+    exit(0)
+}
+
+func displayLabel(_ l: String) -> String { l == noneLabel ? "(none)" : l }
 
 if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     let url = URL(fileURLWithPath: (args[i + 1] as NSString).expandingTildeInPath)

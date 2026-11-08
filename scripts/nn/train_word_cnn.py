@@ -1,4 +1,4 @@
-"""Train the single-word CNN (D51) on this Mac's recorded takes and write Resources/Models/word_cnn.json.
+"""Train the single-word CNN (D53) on this Mac's recorded takes and write Resources/Models/word_cnn.json.
 
     python3 -m venv .venv-nn && .venv-nn/bin/pip install torch numpy
     swift run -c release LouVoiceCheck --eval ~/Library/Application\\ Support/LouVoice/dataset.json \\
@@ -6,7 +6,7 @@
     .venv-nn/bin/python scripts/nn/train_word_cnn.py /tmp/features.json
 
 Then rebuild the app (scripts/build-app.sh copies Resources/Models into the bundle).
-Classes: the 5 words of word mode plus `_none` (the variant chosen in D51). Quiz takes are never used.
+Classes: the 5 words of word mode plus `_none` (the variant chosen in D53). Quiz takes are never used.
 The architecture must match Sources/LouVoiceCore/CNNWordModel.swift.
 """
 import argparse, json, math
@@ -21,9 +21,11 @@ p.add_argument("--variant", default="dedicated", choices=["dedicated", "others-n
 p.add_argument("--members", type=int, default=3)
 p.add_argument("--epochs", type=int, default=100)
 p.add_argument("--T", type=int, default=48)
+p.add_argument("--gain", default="0.85,1.15", help="training strength range (log-uniform), e.g. 0.5,1.6")
 args = p.parse_args()
 torch.set_num_threads(8)
 NONE = "_none"
+GAIN = tuple(float(v) for v in args.gain.split(","))
 WORDS = args.words.split(",")
 
 raw = json.load(open(args.features))
@@ -53,7 +55,8 @@ def augment(x, rng):
     """Same family as Augment.swift: rotate xyz triplets (re-seating), time-warp, gain, jitter."""
     x = x.copy(); R = rot(rng)
     for g in range(0, VD, 3): x[:, g:g + 3] = x[:, g:g + 3] @ R.T
-    x *= rng.uniform(0.85, 1.15)
+    lo, hi = GAIN
+    x *= math.exp(rng.uniform(math.log(lo), math.log(hi)))  # mouthing strength varies with fatigue
     n = len(x); m = max(4, int(round(n * rng.uniform(0.8, 1.2)))); src = np.linspace(0, n - 1, m)
     x = np.stack([np.interp(src, np.arange(n), x[:, d]) for d in range(D)], 1).astype(np.float32)
     return x + rng.normal(scale=0.03, size=x.shape).astype(np.float32) * x.std(0, keepdims=True)

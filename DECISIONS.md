@@ -593,12 +593,86 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 
 **Checked:** Spotify paused, then LouVoice launched: LouVoice holds now playing at 1, 3, 6 and 10 s. Spotify brought to the front, then LouVoice again: LouVoice reclaims it. **Not checked:** a physical stem press (needs a person).
 
+### D53: A CNN decodes single words in word mode (2026-11-07). *Replaces DTW for word mode when it knows every allowed word.*
+**Request:** Use a neural net for single words if it beats the DTW recogniser on held-out takes. Word mode only ever hears hello, can, you, hear, me (any order) or no word.
+
+**Model:** a small 1D CNN on the default pipeline's features (rotation + attitude + magnitudes, 25 Hz): 4 residual dilated Conv1d(64) + BatchNorm + GELU layers, masked average + max pooling, take length, one linear layer. 6 classes (the 5 words + `_none`), 3 networks averaged. Trained with the same augmentation family as `Augment.swift`, class-balanced loss. Trained offline in PyTorch (`scripts/nn/train_word_cnn.py`); weights ship as `Resources/Models/word_cnn.json` (3.9 MB); `CNNWordModel.swift` runs it in Swift (~6 ms per word, same top answer as PyTorch on all 748 takes, probabilities equal to 1e-7).
+
+**Test** (same protocol as `--word-mode`, D50: every isolated take of the 5 words, decoded by a model that never saw its block; plus every isolated `_none` take):
+
+| Model | Words right | Wrong | Refused | No-word refused |
+|---|---|---|---|---|
+| DTW, no context (what word mode used) | 68% (223/330) | 100 | 7 | – |
+| CNN, 13 classes, answer limited to the 6 | 80% (265/330) | 53 | 12 | 78% (43/55) |
+| **CNN, 6 classes (chosen)** | **81% (266/330)** | 56 | 8 | **80% (44/55)** |
+| CNN, 6 classes, other words count as no word | 80% (265/330) | 45 | 20 | 73% (40/55) |
+
+The shipped model (trained on every training take, never quiz takes) gets 50/55 quiz takes of the 5 words right (91%).
+
+Earlier, across all 12 words + `_none` (leave-one-block-out, 686 takes): CNN 57% vs DTW 51%, words 55% vs 49%, non-word rejected 80% vs 73%, quiz 85% vs 71%.
+
+**Behaviour:**
+- Word mode uses the CNN when it knows every word that may come out (`Decoder.cnnForWordMode`). A taught word it doesn't know, a missing weights file, or the simulator (CNN trained on real AirPods only) uses DTW as before, so the one-word fallback always works (CLAUDE.md rule 3).
+- Dev mode › Decode has a switch to compare CNN and DTW.
+- `TODO(team)`: `Decoder.cnnMinConfidence` is 0 (always answers; nod/shake confirms). At ≥ 0.7 it would speak 58% of the time and be right 93% of the time when it does.
+
+**Limit:** the CNN doesn't learn from new takes by itself. After more practice, re-run the export and `train_word_cnn.py` (instructions at the top of the script), then rebuild the app.
+
 ### D54: History tab with simulated deterioration (2026-11-07)
-**Request:** A simple "History" tab showing decline over time, as ALS progresses: two line graphs, movement strength and accuracy, with simulated data.
+**Request:** A simple "History" tab showing change over time with ALS: two line graphs, movement strength and accuracy, with simulated data. Follow-ups: the "too weak" line near 20%, accuracy should stay up, and the graphs styled like the landing page's charts.
 
 **Changes:**
-- New tab **History** (`HistoryView`), after Speak. It shows two summary cards (now vs. first week) and two Swift Charts line graphs: **movement strength** (% of the first week) and **accuracy** (% of practice words right). The strength chart has a dashed "Too weak to read reliably" line at 45% (`HistoryData.weakLevel`, `TODO(team)`).
-- **Simulated data**, labelled on screen: 39 weekly points over about nine months, deterministic (SplitMix64 seed 7). Strength = 100 − 52·t^1.35 ± 2.5. Accuracy holds near 95% until strength falls below 80%, then drops about 1 point per point of strength lost (± 2). It ends around 47% strength and 59% accuracy.
+- New tab **History** (`HistoryView`), after Speak: two Swift Charts line graphs **side by side**, **movement strength** (% of the first week) and **accuracy** (% of practice takes right). Each title has the current value inline (average of the last 4 weeks) and the change since the first 4. No explanatory subtext.
+- **Hover:** moving the pointer over either graph snaps to the nearest week in **both** graphs: a vertical line, a dot on each word, and a tooltip with that week's value (flipped to the left near the right edge). Simulated dates are anchored to the start of today, so they match exactly.
+- **Style:** one jagged line per graph (dark purple for strength, purple for accuracy), straight segments, no fill. The charts sit on the paper with a display-type title and gridlines at 0/50/100% only. The strength chart has a dashed "Too weak to read reliably" line at **20%** (`HistoryData.weakLevel`, `TODO(team)`). (A five-lines-per-word version was tried and dropped for a single line.)
+- **Simulated data** (the on-screen "Simulated data" badge and hover hint were removed on request): 39 weekly points over about nine months, deterministic (SplitMix64 seed 7). Strength = 100 − 52·t^1.35 ± 4. Accuracy **stays high**: 95% easing about 4 points over the period (−3.5 to +3 noise), because regular practice keeps LouVoice adapted. It only drops within 15 points of the "too weak" line.
 - **Header:** the tabs now share the row with the logo and buttons (flexible space either side) instead of a centred overlay, because four tabs plus Help and Settings overlapped the AirPods dot.
 
-**Next (`TODO(team)`):** replace the simulation with real numbers per session: average take strength (the quality gate's motion energy) relative to the first block, and held-out accuracy per training block.
+**Next (`TODO(team)`):** replace the simulation with real numbers per word and session: average take strength (the quality gate's motion energy) relative to the first block, and held-out accuracy per training block.
+
+### D55: One-time calibration of the word CNN before Speak (2026-11-08). *Extends D53.*
+**Problem:** Live quizzes on 2026-11-07/08 scored the shipped CNN at 38% (46/120 over three 20-take quizzes) against 81% offline. The earbud sat about 10–15° differently than in the afternoon sessions that make up most of the training data (resting gravity x +0.17…+0.19 vs −0.06), and "hear"/"me" were mouthed smaller. The offline test held out rounds from the same afternoon, so it didn't see this.
+
+**Fix:** The first time Speak is used in word mode (real AirPods), it asks for a calibration: each word-mode word mouthed 4 times (20 prompts, ~80 s, no quiz or adaptive extras). Then, per network: BatchNorm statistics are re-measured on those takes and blended 50/50 with the trained ones, and the last layer is retrained (Adam, 150 steps, lr 0.01, cross-entropy on the calibration takes + 0.5 × a 32-take batch from 150 replayed training takes). Takes ~2 s. The result is saved to `word_cnn_calibration.json` next to the dataset and loaded at launch; the takes are kept as training data (block `calibrate-…`). Settings › Speaking shows when it was calibrated and has **Recalibrate**.
+
+**Test** (calibrate on the first k takes per word of one of tonight's quizzes, test on another, all 6 ordered pairs, 120 test takes; `LouVoiceCheck --calibration-sim`):
+
+| Method (Python) | k = 1 | k = 2 | k = 4 |
+|---|---|---|---|
+| No calibration | 38% | 38% | 38% |
+| BatchNorm re-measure only | 38% | 38% | 36% |
+| Prototypes | 43% | 41% | 43% |
+| Last layer | 48% | 50% | 58% |
+| **50% BatchNorm + last layer (chosen)** | 51% | 48% | **61%** |
+| Fine-tune everything (needs autograd in the app) | 53% | 54% | 68% |
+
+Swift implementation, k = 4: 46/120 → **77/120 (64%)**; hear 0 → 18/24, me 8 → 13, can 6 → 10, hello 12 → 15, you 20 → 21. k = 2 only reaches 57/120, hence 4.
+
+**Limits:** all three test quizzes come from one evening. Full fine-tuning would add ~7 points but needs training support in Swift (MPSGraph / MLX); not done. The base model still needs more sessions recorded in different fits.
+
+### D56: Sentences are spoken as one ElevenLabs clip; both demo sentences always on (2026-11-08)
+**Request:** Speak a decoded sentence as a whole sentence, not word clips back to back, and make sure both "hello can you hear me" and "my name is konrad how are you today" are possible in sentence mode.
+
+**Changes:**
+- `VoiceService.speak(words:)` plays the whole sentence as one clip: cached if prepared, otherwise fetched live and cached. Only if that fails does it fall back to the word clips (D39 behaviour), then to text only.
+- `AppModel.voiceVocabulary` = every word + every expected phrase. All `prepare` calls (launch, new word, end of training, Settings › Get all words ready) use it, so both sentences are cached as whole clips and play instantly and offline.
+- `AppModel.speakPhrases`: Speak's sentence mode always includes both default sentences, even if the phrase list was edited in dev mode.
+
+**Check:** `LouVoiceCheck --eval … --demo` on the current data: 50 recorded sentence takes (33 × sentence 1, 17 × sentence 2), combined vote 50/50 right.
+
+### D57: One-time sentence calibration before Speak in sentence mode (2026-11-08). *Extends D55 to sentences.*
+**Problem:** "my name is konrad how are you today" stopped being recognised live. All 17 recordings of it were made 18:31–18:39 with the earbud at a resting tilt of −0.06…−0.01 (gravity x); tonight's fit is +0.17 (D55). Whole-sentence matching (D46) compares against those recordings, so tonight's fit doesn't match them.
+
+**Fix:** The first time Speak is used in sentence mode (real AirPods), it asks for a sentence calibration: each Speak sentence mouthed 3 times (both demo sentences → 6 prompts, full length, shuffled; `Enrollment.startSentences(…, balanced: true)`). They're saved like sentence training (whole-sentence references plus word takes cut from them), the recogniser is rebuilt so they're used straight away, and a marker file (`sentence_calibration.json`) records that it's done. Settings › Speaking › Recalibrate clears both the word (D55) and sentence calibrations.
+
+**Not measured:** there are no labelled sentence takes in tonight's fit yet to test with; the first calibration creates them. Re-check with `--demo` after it.
+
+### D58: Recalibrate on Speak; "Speak aloud" picks the output device (2026-11-08)
+**Request:** Let calibration be reset with a Recalibrate button on Speak, and make "Speak aloud" a dropdown of the Mac's audio outputs.
+
+**Changes:**
+- **Recalibrate on Speak:** a button beside Speak aloud (when the word model is loaded) runs `resetCalibration()` then `startCalibration()`, so the calibration card appears straight away. It's disabled while recording, thinking or practising. Its tooltip shows when the last calibration was. Settings › Speaking keeps its own Recalibrate.
+- **Speak aloud dropdown** (`SpeakAloudMenu`, on Speak and in Settings › Speaking): Off, System default (with the device's name), then every output device from CoreAudio (`AudioOutputs.list()`), plus "Refresh list". Off sets `Decoder.speakResult` false; picking a device turns it on and saves `VoiceService.outputDeviceUID` (UserDefaults `speakOutputDevice`). The AirPods stem still toggles on/off (D51) and keeps the chosen device.
+- **Routing:** ElevenLabs clips use `AVAudioPlayer.currentDevice` and `AVQueuePlayer.audioOutputDeviceUniqueID`. The Mac voice fallback can't choose a device, so with a device chosen it's rendered to a short file (`AVSpeechSynthesizer.write`) and played the same way. That adds roughly 0.1–0.3 s. If the chosen device is disconnected, the system default is used, and the menu says "device not connected". Cue beeps still use the system default.
+
+**Not checked:** sound actually coming out of a non-default device (this Mac listed only its built-in speakers at the time).
