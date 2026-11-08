@@ -26,8 +26,8 @@ struct TrainView: View {
 
 // MARK: Signal preview
 
-/// Small live rotation plot so the user can see the AirPods feel their jaw while practising.
-private struct SignalPreview: View {
+/// Small live rotation plot so the user can see the AirPods feel their jaw (Train and Speak).
+struct SignalPreview: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
@@ -204,7 +204,7 @@ private struct TrainPrompt: View {
             case .blockBreak(let next):
                 Eyebrow(text: "Break")
                 Text("Take a rest").font(LV.display(56))
-                Text("Take both AirPods out, then put them back in.\nWhen you're ready, press Space or the AirPod stem.")
+                Text("Take both AirPods out, then put them back in.\nWhen you're ready, press Space.")
                     .font(LV.sans(22)).multilineTextAlignment(.center).foregroundStyle(LV.ink.opacity(0.8))
                 Button("Continue to round \(next)") { e.continueAfterBreak() }
                     .lvButton(.primary, .large).keyboardShortcut(.defaultAction)

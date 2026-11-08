@@ -25,6 +25,25 @@ if args.contains("--sim-eval") {
     exit(0)
 }
 // --eval <dataset.json> [--tune]: honest evaluation of recorded takes, optionally auto-tuned.
+// --cnn-probs <weights.json> <features.json> <out.json>: Swift CNN probabilities for every exported
+// take, to check the Swift forward pass against the Python one (D51).
+if let i = args.firstIndex(of: "--cnn-probs"), i + 3 < args.count {
+    let path = { (s: String) in URL(fileURLWithPath: (s as NSString).expandingTildeInPath) }
+    let model = try! CNNWordModel(contentsOf: path(args[i + 1]))
+    let root = try! JSONSerialization.jsonObject(with: Data(contentsOf: path(args[i + 2]))) as! [String: Any]
+    let start = Date()
+    var out: [[Double]] = []
+    for t in root["takes"] as! [[String: Any]] {
+        let values = (t["values"] as! [NSNumber]).map(\.doubleValue)
+        let seq = FeatureSequence(values: values, dims: t["dims"] as! Int, vectorDims: t["vectorDims"] as? Int)
+        out.append(seq.count >= 4 ? model.probabilities(seq) : [])
+    }
+    try! JSONSerialization.data(withJSONObject: ["labels": model.labels, "probs": out]).write(to: path(args[i + 3]))
+    print(String(format: "%d takes in %.2f s (%.1f ms each)", out.count, Date().timeIntervalSince(start),
+                 Date().timeIntervalSince(start) / Double(max(out.count, 1)) * 1000))
+    exit(0)
+}
+
 if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     let url = URL(fileURLWithPath: (args[i + 1] as NSString).expandingTildeInPath)
     guard let data = try? Data(contentsOf: url), var dataset = try? JSONDecoder().decode(Dataset.self, from: data) else {

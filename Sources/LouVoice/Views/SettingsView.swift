@@ -41,10 +41,12 @@ private struct VoiceCard: View {
                 .toggleStyle(LVToggleStyle())
             StatusBadge(tone: v.isConfigured ? .good : .neutral,
                         text: v.isConfigured ? "Voice is set up · \(v.cachedWords.count) of \(model.words.count) words ready"
-                                             : "Not set up yet: using the Mac's voice")
+                                             : (v.settings.enabled ? "Not set up yet: using the Mac's voice" : "Off: using the Mac's voice"))
             HStack(spacing: 12) {
                 Button { Task { await v.speak(VoiceSettingsView.testPhrase) } } label: { Label("Hear my voice", systemImage: "play.fill") }
                     .lvButton(.primary).disabled(v.isPreparing)
+                Button("Test ElevenLabs") { Task { await v.testConnection() } }
+                    .lvButton(.outline).disabled(v.isPreparing || !v.isConfigured)
                 Button(showSetup ? "Hide set-up" : "Set up voice") { showSetup.toggle() }.lvButton(.outline)
             }
             if showSetup {
@@ -69,10 +71,11 @@ private struct VoiceCard: View {
                     }
                     .lvButton(.outline).disabled(!v.isConfigured || v.isPreparing || model.words.isEmpty)
                     if v.isPreparing { ProgressBar(value: v.prepareProgress) }
-                    if let e = v.lastError { Text(e).font(LV.small).foregroundStyle(LV.bad) }
                 }
                 .padding(.top, 4)
             }
+            if !v.status.isEmpty { Text(v.status).font(LV.small).foregroundStyle(LV.muted) }
+            if let e = v.lastError { Text(e).font(LV.small).foregroundStyle(LV.bad) }
         }
         .onAppear { hasKey = v.hasKey }
     }
@@ -90,9 +93,9 @@ private struct SpeakingCard: View {
                 Eyebrow(text: "Each time I press start, I say")
                 LVChoice(options: [(true, "A whole sentence"), (false, "One word")], selection: $d.sentenceMode)
             }
-            Toggle("Say my words out loud", isOn: $d.speakResult).toggleStyle(LVToggleStyle())
-            Toggle("Start with the AirPod stem", isOn: Binding(
-                get: { model.stem.isEnabled }, set: { $0 ? model.stem.enable() : model.stem.disable() }))
+            Toggle("Speak aloud", isOn: $d.speakResult).toggleStyle(LVToggleStyle())
+            Toggle("AirPod stem turns speaking aloud on and off", isOn: Binding(
+                get: { model.stem.isEnabled }, set: { model.stem.setWanted($0) }))
                 .toggleStyle(LVToggleStyle())
             Toggle("Keep learning from words I say \"yes\" to", isOn: $d.addConfirmedToTraining).toggleStyle(LVToggleStyle())
         }

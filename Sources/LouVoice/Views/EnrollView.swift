@@ -302,7 +302,7 @@ private struct PromptCard: View {
                 Text("Re-seat your AirPods").font(.title.weight(.semibold))
                 Text("Take both out, put them back in, then continue to block \(next).\nThis is what makes the accuracy number honest.")
                     .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                Button("Continue (Space or stem)") { model.enrollment.continueAfterBreak() }
+                Button("Continue (Space)") { model.enrollment.continueAfterBreak() }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             case .finished:
                 Image(systemName: "checkmark.seal.fill").font(.system(size: 54)).foregroundStyle(.green)

@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import MediaPlayer
+import Observation
 
 /// Audio cues and optional spoken prompts. Output only — no microphone (D1).
 ///
@@ -129,21 +130,39 @@ final class CueService {
     }
 }
 
-/// AirPods stem press → capture trigger (D15). macOS routes media remote commands to the
-/// "now playing" app, so while enabled we claim now-playing and keep a silent output stream
-/// alive. Output only; the microphone is never opened.
-@MainActor
+/// AirPods stem press (D15, D51: it turns "Speak aloud" on and off). macOS routes media remote
+/// commands to the "now playing" app, so while enabled we claim now-playing and keep a silent
+/// output stream alive. Output only; the microphone is never opened.
+@MainActor @Observable
 final class StemPress {
-    var onPress: (() -> Void)?
+    @ObservationIgnored var onPress: (() -> Void)?
     private(set) var isEnabled = false
-    private var engine: AVAudioEngine?
-    private var lastPress = Date.distantPast
-    private var targets: [(MPRemoteCommand, Any)] = []
+    /// The user's choice, remembered across launches. On by default.
+    static var wanted: Bool {
+        get { UserDefaults.standard.object(forKey: "stemEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "stemEnabled") }
+    }
+    @ObservationIgnored private var engine: AVAudioEngine?
+    @ObservationIgnored private var lastPress = Date.distantPast
+    @ObservationIgnored private var targets: [(MPRemoteCommand, Any)] = []
+    @ObservationIgnored private var activeObserver: NSObjectProtocol?
+
+    /// Settings switch: turn on or off and remember it.
+    func setWanted(_ on: Bool) {
+        Self.wanted = on
+        on ? enable() : disable()
+    }
 
     func enable() {
         guard !isEnabled else { return }
         isEnabled = true
         startSilence()
+        // Another app (Music, a browser video) can take over "now playing" and with it the stem.
+        // Claim it back whenever LouVoice comes to the front.
+        activeObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                                                object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reclaim() }
+        }
         let center = MPRemoteCommandCenter.shared()
         for command in [center.togglePlayPauseCommand, center.playCommand, center.pauseCommand] {
             command.isEnabled = true
@@ -154,13 +173,22 @@ final class StemPress {
             targets.append((command, token))
         }
         let info = MPNowPlayingInfoCenter.default()
-        info.nowPlayingInfo = [MPMediaItemPropertyTitle: "LouVoice", MPMediaItemPropertyArtist: "Press the stem to speak"]
+        info.nowPlayingInfo = [MPMediaItemPropertyTitle: "LouVoice", MPMediaItemPropertyArtist: "Press the stem to turn speaking on or off"]
         info.playbackState = .playing
+    }
+
+    /// Make LouVoice the "now playing" app again (and restart the silent stream if it stopped).
+    func reclaim() {
+        guard isEnabled else { return }
+        if engine?.isRunning != true { startSilence() }
+        MPNowPlayingInfoCenter.default().playbackState = .playing
     }
 
     func disable() {
         guard isEnabled else { return }
         isEnabled = false
+        if let activeObserver { NotificationCenter.default.removeObserver(activeObserver) }
+        activeObserver = nil
         for (command, token) in targets { command.removeTarget(token) }
         targets.removeAll()
         MPNowPlayingInfoCenter.default().playbackState = .stopped

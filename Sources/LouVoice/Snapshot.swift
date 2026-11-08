@@ -11,19 +11,25 @@ enum Snapshot {
         return URL(fileURLWithPath: args[i + 1])
     }
 
+    static func render(_ model: AppModel, name: String, to dir: URL) {
+        let view = ContentView().environment(model).frame(width: 1280, height: 1240)  // tall: scroll areas render flat here
+        let r = ImageRenderer(content: view)
+        r.scale = 1
+        if let img = r.nsImage, let tiff = img.tiffRepresentation,
+           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? png.write(to: dir.appendingPathComponent("\(name).png"))
+        }
+    }
+
     static func run(model: AppModel, to dir: URL) {
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             for screen in AppModel.Screen.allCases {
                 model.screen = screen
-                let view = ContentView().environment(model).frame(width: 1280, height: 1240)  // tall: scroll areas render flat here
-                let r = ImageRenderer(content: view)
-                r.scale = 1
-                if let img = r.nsImage, let tiff = img.tiffRepresentation,
-                   let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
-                    try? png.write(to: dir.appendingPathComponent("\(screen.rawValue.lowercased()).png"))
-                }
+                render(model, name: screen.rawValue.lowercased(), to: dir)
             }
+            model.showOnboarding = true
+            render(model, name: "onboarding", to: dir)
             NSApp.terminate(nil)
         }
     }

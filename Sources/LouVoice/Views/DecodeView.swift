@@ -111,10 +111,10 @@ struct DecodeView: View {
                 }
             }
             SectionCard(title: "Trigger") {
-                Toggle("AirPods stem press (experimental)", isOn: Binding(
+                Toggle("AirPods stem press turns Speak aloud on/off", isOn: Binding(
                     get: { model.stem.isEnabled },
-                    set: { $0 ? model.stem.enable() : model.stem.disable() }))
-                Text("Space always works. The stem press needs LouVoice to be the \"now playing\" app.")
+                    set: { model.stem.setWanted($0) }))
+                Text("Space starts a capture. The stem press needs LouVoice to be the \"now playing\" app (it reclaims that when it comes to the front).")
                     .font(.caption).foregroundStyle(.secondary)
             }
             SectionCard(title: "Acceptance") {
@@ -124,6 +124,11 @@ struct DecodeView: View {
                     Text(String(format: "Min margin: %.2f", d.minMargin))
                     Slider(value: $d.minMargin, in: 0...0.3)
                 }
+                Toggle("Single words: use the CNN (D51)", isOn: Binding(get: { model.useWordCNN }, set: { model.useWordCNN = $0 }))
+                    .disabled(model.wordCNN == nil)
+                Text(model.wordCNN.map { "CNN knows: " + $0.labels.map(displayLabel).joined(separator: ", ") + ". Other words fall back to DTW." }
+                     ?? "No CNN weights found (Resources/Models/word_cnn.json).")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Speak decoded word", isOn: $d.speakResult)
                 Toggle("Add confirmed words to training", isOn: $d.addConfirmedToTraining)
             }
@@ -179,7 +184,7 @@ private struct ResultCard: View {
                 } else {
                     Image(systemName: "airpodspro").font(.system(size: 54)).foregroundStyle(.secondary)
                     Text(model.classifier == nil ? "Enroll at least two words first"
-                         : d.sentenceMode ? "Press Space (or the stem) and mouth the whole sentence" : "Press Space (or the stem) and mouth a word")
+                         : d.sentenceMode ? "Press Space and mouth the whole sentence" : "Press Space and mouth a word")
                         .font(.title3).foregroundStyle(.secondary)
                 }
             }

@@ -7,21 +7,39 @@ struct SpeakView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let d = model.decoder
+        @Bindable var d = model.decoder
         VStack(spacing: 24) {
-            SpeakCard().frame(maxWidth: .infinity, maxHeight: .infinity)
-            LVCard {
-                HStack(alignment: .top, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Eyebrow(text: "What you've said")
-                        Text(d.transcript.isEmpty ? "Your words will appear here." : d.transcript)
-                            .font(LV.sans(30))
-                            .foregroundStyle(d.transcript.isEmpty ? LV.muted : LV.ink)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    Button("Clear") { d.clear() }.lvButton(.outline).disabled(d.results.isEmpty)
+            HStack {
+                Spacer()
+                Toggle(isOn: $d.speakResult) {
+                    Label("Speak aloud", systemImage: d.speakResult ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                        .font(LV.sans(18, .semibold))
                 }
+                .toggleStyle(LVToggleStyle())
+                .fixedSize()
+                .help("Off: your words are shown on screen but not spoken. Press an AirPod stem to switch.")
+                if model.stem.isEnabled {
+                    Text("or press an AirPod stem").font(LV.sans(16)).foregroundStyle(LV.muted)
+                }
+            }
+            SpeakCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(alignment: .bottom, spacing: 24) {
+                LVCard {
+                    HStack(alignment: .top, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Eyebrow(text: "What you've said")
+                            Text(d.transcript.isEmpty ? "Your words will appear here." : d.transcript)
+                                .font(LV.sans(30))
+                                .foregroundStyle(d.transcript.isEmpty ? LV.muted : LV.ink)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        Button("Clear") { d.clear() }.lvButton(.outline).disabled(d.results.isEmpty)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                // Same live jaw-motion plot as on Train.
+                SignalPreview().frame(width: 320)
             }
         }
         .padding(40)
@@ -57,7 +75,7 @@ private struct SpeakCard: View {
             } else if model.classifier != nil, d.phase == .idle {
                 Button { d.trigger() } label: { Label("Start speaking", systemImage: "waveform") }
                     .lvButton(.primary, .huge)
-                Text("Or press Space, or the AirPod stem.").font(LV.body).foregroundStyle(LV.muted)
+                Text("Or press Space.").font(LV.body).foregroundStyle(LV.muted)
             }
         }
         .padding(40)

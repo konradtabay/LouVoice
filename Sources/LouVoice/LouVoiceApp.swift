@@ -12,7 +12,7 @@ struct LouVoiceApp: App {
         WindowGroup("LouVoice") {
             ContentView()
                 .environment(model)
-                .frame(minWidth: 1100, minHeight: 760)
+                .frame(minWidth: 1240, minHeight: 760)  // header: centred tabs + AirPods dot, Help, Settings
                 .onAppear { model.start() }
         }
         .windowToolbarStyle(.unified)

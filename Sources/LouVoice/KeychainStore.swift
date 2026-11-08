@@ -20,7 +20,8 @@ enum KeychainStore {
         let update: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
         if status == errSecSuccess { return true }
-        guard status == errSecItemNotFound else { return false }
+        // An item made by an earlier build may refuse the update; replace it instead.
+        if status != errSecItemNotFound { SecItemDelete(baseQuery as CFDictionary) }
         var add = baseQuery
         add[kSecValueData as String] = data
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked

@@ -538,7 +538,7 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 **Request:** A Word / Sentence toggle on the Speak screen. Word mode detects only the single words of "hello can you hear me" for now. Sentence mode outputs "hello can you hear me", "my name is konrad how are you today", or nothing.
 
 **Changes:**
-- **Switching modes:** click the header's AirPods dot (`LiveIndicator`). Green = word mode, purple = sentence mode, with "· Word" / "· Sentence" beside "AirPods on". It's bound to `Decoder.sentenceMode` (same setting as Settings › Speaking) and does nothing while recording or thinking. While the AirPods are off, the dot stays orange and clicking it still opens Signals. (A Word | Sentence switch on Speak was tried first and replaced by this.)
+- **Switching modes:** click the header's AirPods dot (`LiveIndicator`). Green = word mode, purple = sentence mode; only the colour changes, with no mode text beside "AirPods on" (user request). It's bound to `Decoder.sentenceMode` (same setting as Settings › Speaking) and does nothing while recording or thinking. While the AirPods are off, the dot stays orange and clicking it still opens Signals. (A Word | Sentence switch on Speak was tried first and replaced by this.)
 - **Word mode:** decoding is limited to the trained words of the first expected phrase (`Decoder.wordModeWords`; `_none` is still allowed, so movement is still refused). The Context screen's `activeWords` narrows this further. If fewer than two of those words are trained, word mode falls back to every trained word, so the one-word fallback always works (CLAUDE.md rule 3). `TODO(team)`: widen to all words once the newer words are accurate enough.
 - **Sentence mode on Speak:** always runs with `onlyExpectedPhrases` and `rejectNothing` on (D45, D47), whatever the developer switches on Decode say. The Decode screen keeps its own switches for experiments.
 
@@ -562,3 +562,24 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 - A "not sure, say it again" margin gate doesn't reach 95% usefully: margin ≥ 0.2 makes spoken words 90% right but refuses 69% of tries.
 
 **Decision:** The user chose **any order** for word mode. Speak › Word decodes with context weight 0; the Decode screen keeps its context slider. Getting closer to 95% in any order needs a better motion model or more data, not settings.
+
+### D50: Speak aloud switch; ElevenLabs key read once; voice check (2026-11-07)
+- **Speak aloud** (`Decoder.speakResult`) is now saved (UserDefaults `speakAloud`) and has a switch at the top of the Speak screen; Settings › Speaking uses the same name. Off = words are shown, not spoken.
+- **"Speak in my voice" off** now uses the Mac's voice instead of going silent; muting is Speak aloud's job.
+- **API key:** read from the Keychain once per launch and kept in memory. The app is ad-hoc signed, so every rebuild is a "new app" to the Keychain and asks once (Always Allow); before, it read the Keychain on every spoken word. Saving a key now replaces an item an older build made if the update is refused.
+- **Settings › Your voice:** a "Test ElevenLabs" button (fetches "hello" live and plays it), and status and errors always shown, not only inside set-up.
+- **`open build/LouVoice.app --args --voice-check`** runs the same test headless and prints whether a key and voice ID are saved and whether ElevenLabs answered (never the key). It must be launched through LaunchServices (`open`), not by running the binary directly (D27).
+- **Verified 2026-11-07:** key and voice ID saved, ElevenLabs returned "hello" in the user's voice in 0.6 s, and all 12 vocabulary words are cached as 44.1 kHz MP3s.
+
+### D51: The AirPods stem turns "Speak aloud" on and off (2026-11-07). *Replaces the stem-as-trigger part of D15.*
+**Request:** Make the stem press actually work, and have it switch spoken output on and off.
+
+**Why it didn't work:** `StemPress` was off by default and only switched on from Settings. The switch also didn't refresh, because `StemPress` wasn't observable. So a stem press normally reached Music or whichever app was "now playing", not LouVoice.
+
+**Changes:**
+- **On by default** at launch, remembered across launches (`stemEnabled`; Settings › Speaking › "AirPod stem turns speaking aloud on and off"). Not enabled in isolated runs (`LOUVOICE_DATA_DIR`: smoke test, snapshots).
+- **A press toggles `Decoder.speakResult` on any screen** and says "Speaking on" or "Speaking off" through the cue voice, so it works without looking at the screen. Starting a capture, and continuing after a practice break, are Space or the on-screen button.
+- **Keeping the stem:** LouVoice claims "now playing" again whenever it comes to the front (and restarts its silent output stream if it stopped). Another app playing media in the background can still take the stem until LouVoice is brought forward.
+- Text updated: Speak ("or press an AirPod stem" beside Speak aloud; "Or press Space."), Settings, the Decode console, the practice break, and the now-playing subtitle.
+
+**Not verified:** a real stem press on hardware. `TODO(team)`: test with AirPods Pro 2, including after Music has played.

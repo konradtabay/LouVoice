@@ -36,6 +36,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(PaperBackground())
+        .overlay { if model.showOnboarding { OnboardingView() } }
         .foregroundStyle(LV.ink)
         .tint(LV.heart)
     }
@@ -45,25 +46,31 @@ private struct Header: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 16) {
             // Clicking the logo switches to dev mode (the original UI). TODO(team): hidden on purpose so the patient doesn't hit it.
             Button { model.devMode = true } label: { Wordmark() }
                 .buttonStyle(.plain)
                 .help("Dev mode")
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
+            LiveIndicator().fixedSize()
+            Button { model.showOnboarding = true } label: {
+                Label("Help", systemImage: "questionmark.circle").labelStyle(.titleAndIcon)
+            }
+            .lvButton(.outline)
+            .fixedSize()
+            .help("Show how LouVoice works")
+            Button { open(.settings) } label: {
+                Label("Settings", systemImage: "gearshape").labelStyle(.titleAndIcon)
+            }
+            .lvButton(model.screen == .settings ? .primary : .outline)
+            .fixedSize()
+            .keyboardShortcut(",", modifiers: .command)
+        }
+        // Tabs sit on their own layer so they stay centred whatever the side widths are.
+        .overlay {
             HStack(spacing: 48) {
                 ForEach(AppModel.Screen.tabs) { tab in TabLink(tab: tab) }
             }
-            HStack(spacing: 16) {
-                Spacer()
-                LiveIndicator()
-                Button { open(.settings) } label: {
-                    Label("Settings", systemImage: "gearshape").labelStyle(.titleAndIcon)
-                }
-                .lvButton(model.screen == .settings ? .primary : .outline)
-                .keyboardShortcut(",", modifiers: .command)
-            }
-            .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 32)
         .frame(height: 84)
@@ -130,16 +137,14 @@ struct LiveIndicator: View {
                 }
                 .frame(width: 20, height: 20)
                 .animation(.easeOut(duration: 0.2), value: sentence)
+                // The dot's colour alone shows the mode: no Word / Sentence text (user request).
                 Text(live ? "AirPods on" : "AirPods off").font(LV.sans(16, .semibold))
-                if live {
-                    Text("· \(mode)").font(LV.sans(16)).foregroundStyle(LV.muted)
-                }
             }
             .foregroundStyle(LV.ink)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(live ? "\(mode) mode. Click to switch to \(sentence ? "word" : "sentence") mode." : "AirPods not connected. Click to check.")
+        .help(live ? "Click to switch mode." : "AirPods not connected. Click to check.")
         .accessibilityLabel(live ? "AirPods connected, \(mode.lowercased()) mode" : "AirPods not connected")
         .accessibilityHint(live ? "Switches between word and sentence mode" : "Opens Signals")
         .onAppear {

@@ -51,6 +51,17 @@ final class AppModel {
     }
     var devScreen: DevScreen = .enroll
 
+    /// First-run walkthrough of the simple UI. Shown once; Help in the header shows it again.
+    /// Never shown for --smoke / --snapshot runs.
+    var showOnboarding = !UserDefaults.standard.bool(forKey: "onboardingDone")
+        && !CommandLine.arguments.contains("--smoke") && !CommandLine.arguments.contains("--snapshot")
+
+    func finishOnboarding() {
+        showOnboarding = false
+        UserDefaults.standard.set(true, forKey: "onboardingDone")
+        screen = .train
+    }
+
     enum DevScreen: String, CaseIterable, Identifiable {
         case sensors = "Sensors", enroll = "Enroll", evaluate = "Evaluate", tune = "Tune", decode = "Decode"
         var id: String { rawValue }
@@ -66,6 +77,11 @@ final class AppModel {
     }
     private(set) var dataset: Dataset
     private(set) var classifier: Classifier?
+    /// Single-word CNN (D51), shipped as Resources/Models/word_cnn.json. nil = file missing or
+    /// unreadable; word mode then uses the DTW classifier as before.
+    let wordCNN: CNNWordModel? = AppModel.loadWordCNN()
+    /// Developer switch (Decode console): use the CNN for single words when it knows every allowed word.
+    var useWordCNN = true
     /// Recorded whole sentences (scaled features by phrase) for the demo's second vote (D46).
     private(set) var sentenceReferences: [String: [FeatureSequence]] = [:]
     private(set) var isTraining = false
@@ -110,7 +126,22 @@ final class AppModel {
         started = true
         hub.onSample = { [weak self] s in self?.decoder.ingest(s) }
         stem.onPress = { [weak self] in self?.stemPressed() }
+        // The stem is on unless the user turned it off. Not in isolated runs (smoke test, snapshots),
+        // which shouldn't take over the Mac's "now playing" media controls.
+        if StemPress.wanted, ProcessInfo.processInfo.environment["LOUVOICE_DATA_DIR"] == nil { stem.enable() }
         if CommandLine.arguments.contains("--smoke") { SmokeTest(model: self).run() }
+        // --voice-check: the real ElevenLabs path (Keychain key, saved voice ID, live fetch, playback),
+        // printed to stdout, then quit. Never prints the key.
+        if CommandLine.arguments.contains("--voice-check") {
+            Task { @MainActor in
+                let v = self.voice
+                setvbuf(stdout, nil, _IOLBF, 0); print("voice-check: key saved: \(v.hasKey), voice ID saved: \(!v.voiceID.isEmpty) (\(v.voiceID.count) chars), my voice on: \(v.settings.enabled), speak aloud: \(self.decoder.speakResult)")
+                await v.testConnection()
+                print("voice-check: \(v.status)" + (v.lastError.map { " — \($0)" } ?? ""))
+                try? await Task.sleep(for: .seconds(2)) // let "hello" finish playing
+                exit(v.lastError == nil && v.status.hasPrefix("ElevenLabs works") ? 0 : 1)
+            }
+        }
         if let dir = Snapshot.directory { Snapshot.run(model: self, to: dir) }
         hub.start()
         installKeyMonitor()
@@ -309,12 +340,11 @@ final class AppModel {
         }
     }
 
+    /// AirPods stem press: turns "Speak aloud" on or off, on any screen (D51), and says which.
+    /// Starting a capture is Space or the on-screen button.
     private func stemPressed() {
-        switch keyTarget {
-        case .speak: decoder.trigger()
-        case .train: enrollment.continueAfterBreak()
-        case .none: break
-        }
+        decoder.speakResult.toggle()
+        cues.say(decoder.speakResult ? "Speaking on" : "Speaking off")
     }
 
     private func installKeyMonitor() {
@@ -331,6 +361,20 @@ final class AppModel {
                 }
             }
             return consumed ? nil : event
+        }
+    }
+
+    // MARK: Word CNN
+
+    private static func loadWordCNN() -> CNNWordModel? {
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("Models/word_cnn.json"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources/Models/word_cnn.json"),
+        ].compactMap { $0 }
+        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else { return nil }
+        do { return try CNNWordModel(contentsOf: url) } catch {
+            print("word CNN not loaded: \(error)")
+            return nil
         }
     }
 

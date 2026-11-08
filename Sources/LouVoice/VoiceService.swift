@@ -56,9 +56,15 @@ final class VoiceService {
 
     // MARK: Key (Keychain, or ELEVENLABS_API_KEY for development; never in the bundle or the repo)
 
+    /// The key, read from the Keychain once per launch. Every rebuild of the ad-hoc-signed app is
+    /// a "new app" to the Keychain, which asks before letting it read the key; reading once means
+    /// one prompt ("Always Allow") instead of one per spoken word.
+    @ObservationIgnored private var keyLoaded = false
+    @ObservationIgnored private var cachedKey: String?
     private var apiKey: String? {
         if let env = ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"], !env.isEmpty { return env }
-        return KeychainStore.read()
+        if !keyLoaded { cachedKey = KeychainStore.read(); keyLoaded = true }
+        return cachedKey
     }
     var hasKey: Bool { apiKey != nil }
     var isConfigured: Bool { hasKey && !VoiceCache.sanitizedVoiceID(voiceID).isEmpty }
@@ -66,11 +72,17 @@ final class VoiceService {
     func setAPIKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        status = KeychainStore.save(trimmed) ? "API key saved in Keychain" : "Couldn't save the API key to the Keychain"
+        if KeychainStore.save(trimmed) {
+            cachedKey = trimmed; keyLoaded = true; lastError = nil
+            status = "API key saved in Keychain"
+        } else {
+            status = "Couldn't save the API key to the Keychain"
+        }
     }
 
     func removeAPIKey() {
         KeychainStore.delete()
+        cachedKey = nil; keyLoaded = true
         status = "API key removed"
     }
 
@@ -86,6 +98,22 @@ final class VoiceService {
     private func isCached(_ text: String) -> Bool {
         guard let url = cacheURL(text) else { return false }
         return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    /// Settings › "Test my voice": fetches one word live (bypassing the cache) and plays it, and
+    /// says exactly what went wrong if it fails.
+    func testConnection() async {
+        lastError = nil
+        guard hasKey else { status = "No API key saved"; return }
+        guard !VoiceCache.sanitizedVoiceID(voiceID).isEmpty else { status = "No voice ID saved"; return }
+        status = "Asking ElevenLabs…"
+        let start = Date()
+        if let url = cacheURL("hello") { try? FileManager.default.removeItem(at: url) }
+        guard let url = await fetch("hello") else { status = "ElevenLabs test failed"; return }
+        cachedWords.insert("hello")
+        let ok = play(url)
+        status = ok ? String(format: "ElevenLabs works: \"hello\" in your voice, %.1f s", Date().timeIntervalSince(start))
+                    : "Got audio from ElevenLabs but couldn't play it"
     }
 
     func refreshCache(words: [String]) {
@@ -141,7 +169,7 @@ final class VoiceService {
     func speak(_ text: String) async -> (source: Source, seconds: Double) {
         let start = Date()
         lastTextOnly = nil
-        guard settings.enabled else { return finish(text, .textOnly, start, played: false) }
+        guard settings.enabled else { return speakSystem(text, start) }
         // TODO(team): with no key/voice set up at all, the system voice keeps decode audible for
         // demos. Once set up, a failed fetch shows text only (team decision, 2026-11-07).
         guard isConfigured else { return speakSystem(text, start) }
@@ -163,8 +191,7 @@ final class VoiceService {
         let start = Date()
         let text = words.joined(separator: " ")
         lastTextOnly = nil
-        guard settings.enabled else { return finish(text, .textOnly, start, played: false) }
-        guard isConfigured else { return speakSystem(text, start) }
+        guard settings.enabled, isConfigured else { return speakSystem(text, start) }
         var urls: [URL] = []
         var source = Source.cache
         for w in words {
