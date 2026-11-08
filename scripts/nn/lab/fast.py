@@ -140,7 +140,7 @@ class Fast:
             opt = torch.optim.AdamW(net.parameters(), lr=c["lr"], weight_decay=c["wd"])
             steps = c["epochs"] * math.ceil(len(xs) / c["bs"])
             sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=c["lr"], total_steps=steps)
-            net.train()
+            net.train(); swa = None
             for ep in range(c["epochs"]):
                 idx = torch.randperm(len(xs), generator=g)
                 for b in range(0, len(idx), c["bs"]):
@@ -167,6 +167,21 @@ class Fast:
                         l = F.cross_entropy(net(A, M), yb, weight=cwd, label_smoothing=c["smooth"], reduction="none")
                     loss = (l * wb).sum() / wb.sum()
                     opt.zero_grad(); loss.backward(); opt.step(); sched.step()
+                if c.get("swa") and ep >= int(c["epochs"] * (1 - c["swa"])):
+                    if swa is None:
+                        swa = torch.optim.swa_utils.AveragedModel(net)
+                    swa.update_parameters(net)
+            if swa is not None:
+                # copy averaged weights back, then re-measure BatchNorm statistics on (centred) training takes
+                net.load_state_dict({k.replace("module.", "", 1): v for k, v in swa.state_dict().items() if k != "n_averaged"}, strict=False)
+                bns = [m for m in net.modules() if isinstance(m, nn.BatchNorm1d)]
+                for b in bns: b.reset_running_stats(); b.momentum = None
+                net.train()
+                with torch.no_grad():
+                    for b0 in range(0, len(xs), 128):
+                        A, M = self.augment(X[b0:b0 + 128], n[b0:b0 + 128], None, train=False)
+                        net(A.to(DEV), M.to(DEV))
+                for b in bns: b.momentum = 0.1
             if c.get("ft"):
                 self.finetune(net, X, n, y, takes, cwd, g)
             net.eval(); nets.append(net)

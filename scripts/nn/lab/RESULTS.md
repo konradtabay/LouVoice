@@ -42,6 +42,18 @@ In the app this is `Decoder.cnnMinConfidence` (currently 0, always answers): "No
 - Time-normalised input: DEV 82.7 but XS 71.8 (overfits the late-night blocks).
 - Causal session axis alignment (rotate each session's main motion axes onto a reference): much worse (62–64).
 - ROCKET (random convolution kernels + ridge): 46–56 / 65.
+- Ensembles: accel + base features 80.4 combined; + time-normalised accel 80.8 combined (best overall, but needs two feature pipelines in the app; within noise of the single shipped model at 79.4).
+- Prototypical network trained across sessions (prototypes from the latest takes): 68.2 combined.
+- MixStyle (mixing per-take feature statistics while training): 67.8–73.8 combined.
+- Fit-matched fine-tuning (weight training takes by resting-gravity similarity to the test take): 77–78 combined; gravity tilt as an input: 69.6.
+- Other trained words as extra classes: 73–76 combined.
+- DTW template matching against late-night takes: 42 dev.
+- Training without sentence-cut takes, without flagged sentence cuts, or with sentence cuts at half weight: 76–79 combined.
+- Stochastic weight averaging: 76–78.5 combined.
+- Random search over 16 training hyperparameters (learning rate, weight decay, smoothing, dropout, width, window, augmentation ranges, night weight; running continuously): best so far 78.0 combined, i.e. the defaults are near a local optimum.
+
+## Shipped (D63)
+`ship.py`: accelerometer + rotation + attitude, latest session ×8, 5 networks, every take except `confirmed-*` (locked blocks included, as for any real model). Locked score of the recipe (trained without the locked blocks): **53.3%** (D53 recipe: 43.3%).
 
 ## Findings
 - In-session ceiling: training on half of a late-night block (plus everything else) and testing on the other half only reaches ~76–77%. Late-night takes are mouthed smaller ("you", "hear", "me" ~40–50% less motion than daytime) and vary more take to take. The class-average traces are similar to the daytime ones (no mirrored axes), so this is variability, not a systematic shift.
