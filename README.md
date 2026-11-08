@@ -117,19 +117,19 @@ Each capture (a beep, then about 2 s of motion: a 0.3 s pre-roll plus a 1.8 s wi
 | Resample | Linear interpolation onto an even **25 Hz** grid; gaps are reported | The sensor clock jitters; 25 Hz scored the same as 50 Hz and is cheaper (D30) |
 | Re-seat correction | Rotate the capture so the **rest gravity** (first 0.3 s) points straight down | Cancels how the earbud happens to sit today (D7) |
 | High-pass 0.8 Hz | Removes posture drift and slow head motion | Keeps the jaw band (D37) |
-| Channels | Rotation rate xyz, attitude change since the first sample (as a rotation vector) xyz, plus the rotation-free magnitudes ‖ω‖ and ‖θ‖ | **8 channels per frame**. The accelerometer mostly added noise on real data (D33) |
+| Channels | Rotation rate xyz, attitude change since the first sample (as a rotation vector) xyz, plus the rotation-free magnitudes ‖ω‖ and ‖θ‖. The word CNN also gets user acceleration xyz and ‖a‖ | **8 channels per frame** for DTW (the accelerometer mostly added noise there, D33); **11** for the word CNN, where it helped on small late-night mouthing (D63) |
 | Trim | Smoothed energy (0.2 s window); keep the region above 35% of floor-to-peak, ± 0.08 s | Drops the silent parts of the window (D22) |
 
-The result is a variable-length sequence of 8-dimensional frames. A carefully mouthed single word is typically about 20 frames (0.7–0.9 s after trimming, D43).
+The result is a variable-length sequence of 8-dimensional frames (11 for the word CNN). A carefully mouthed single word is typically about 20 frames (0.7–0.9 s after trimming, D43).
 
-### The network (`CNNWordModel.swift`, trained by `scripts/nn/train_word_cnn.py`)
+### The network (`CNNWordModel.swift`, trained by `scripts/nn/lab/ship.py`)
 
 A small **1D convolutional network over time**, with residual connections and growing dilation, so a few layers can see a whole word:
 
 ```
-input  8 ch × 48 frames (1.92 s), each channel ÷ its training std, word centred, zero-padded + mask
+input  11 ch × 48 frames (1.92 s), each channel ÷ its training std, word centred, zero-padded + mask
   │
-  ├─ Conv1d  8→64, k=5, dilation 1 ── BatchNorm ── GELU            (no residual: channel count changes)
+  ├─ Conv1d 11→64, k=5, dilation 1 ── BatchNorm ── GELU            (no residual: channel count changes)
   ├─ Conv1d 64→64, k=5, dilation 1 ── BatchNorm ── GELU ── + skip
   ├─ Conv1d 64→64, k=5, dilation 2 ── BatchNorm ── GELU ── + skip
   └─ Conv1d 64→64, k=3, dilation 4 ── BatchNorm ── GELU ── + skip
@@ -142,13 +142,13 @@ output  P(hello), P(can), P(you), P(hear), P(me), P(_none)
 ```
 
 - **Receptive field:** about 25 frames (**≈ 1 s**), long enough for one whole word from any position.
-- **Size:** about **57k parameters per network**. **Three networks** trained with different seeds are averaged (an ensemble), so about 172k in total. The weights ship as `Resources/Models/word_cnn.json` (~3.7 MB).
+- **Size:** about **58k parameters per network**. **Five networks** trained with different seeds are averaged (an ensemble), so about 290k in total. The weights ship as `Resources/Models/word_cnn.json` (~6.6 MB), which also names its input channels and carries an `id` (D63).
 - **Masked pooling** means padding never counts. Mean pooling captures the overall shape of the movement, max pooling its strongest moment, and the length feature tells a short "me" from a long "hello".
 - **`_none` class:** chewing, swallowing, nods, head turns and smiles, recorded on purpose, so stray movement gets an answer of *no word* rather than a guess.
 
 ### Training
 
-Training runs offline in PyTorch on the user's own recorded takes, exported with `LouVoiceCheck --export-features`. Quiz takes are never trained on.
+Training runs offline in PyTorch on the user's own recorded takes (`scripts/nn/lab/ship.py`; the features match `LouVoiceCheck --export-features --channels arv` exactly). Every isolated take of the 5 words and `_none` is used, quiz and calibration takes included, except `confirmed-*` takes, whose labels are the model's own guess (dropping them alone was worth +10 points, D63). Takes from the latest session are weighted 8×, so the model leans toward the most recent earbud fit.
 
 - **Augmentation** (the same family as `Augment.swift`), applied fresh to every take in every epoch:
   - **random 3D rotation** of each xyz triplet, up to ±12°, simulating a different earbud fit;
@@ -164,8 +164,8 @@ Training runs offline in PyTorch on the user's own recorded takes, exported with
 
 There's no ML framework at runtime. The forward pass is about 100 lines of plain Swift (`CNNWordModel.probabilities`):
 - **Faster convolutions:** BatchNorm is folded into each convolution as a per-channel `y = a·x + b`.
-- **Speed:** about **6 ms per word** on a MacBook.
-- **Accuracy match:** on all 748 recorded takes it gives the same top answer as PyTorch, with probabilities equal to within 1e-7.
+- **Speed:** about **15–20 ms per word** on a MacBook (five networks).
+- **Accuracy match:** on all 668 training takes it gives the same top answer as PyTorch, with probabilities equal to within 5e-7.
 
 **Word mode** limits the answer to the 5 words plus `_none` and renormalises the probabilities. A nod accepts the result and a head shake rejects it; the app detects both from the same AirPods motion.
 
@@ -179,17 +179,20 @@ So before first use, and whenever you click **Recalibrate**, the app asks you to
 1. **BatchNorm statistics** are re-measured on those 20 takes and blended 50/50 with the trained ones, which re-centres the features for today's fit.
 2. **The last layer** (129→6) is retrained in Swift with Adam: 150 steps, learning rate 0.01, on the new takes, plus a 0.5-weighted replay batch of older takes so it doesn't forget.
 
-This takes about 2 s, is saved next to the dataset, and is reloaded at launch. On that evening's quizzes it raised live accuracy from **38% to 64%**. Sentence mode has a matching calibration that records each demo sentence 3 times (D57).
+This takes about 2 s, is saved next to the dataset, and is reloaded at launch. A saved calibration only applies to the weights it was made for, so new weights ask for a fresh one. On that evening's quizzes it raised live accuracy from **38% to 64%**. Sentence mode has a matching calibration that records each demo sentence 3 times (D57).
 
 ### Results so far
 
-All figures are on **held-out recording blocks** (whole sessions the model never saw, with a re-seat in between); details are in [DECISIONS.md](DECISIONS.md) D53 and D55. Word mode chooses between 5 words, so chance is 20%.
+All figures are on **held-out recording blocks** (whole sessions the model never saw, with a re-seat in between); details are in [DECISIONS.md](DECISIONS.md) D53, D55 and D63, and `scripts/nn/lab/RESULTS.md`. Word mode chooses between 5 words, so chance is 20%.
 
 | Recogniser (5 words + no-word) | Words right | No-word rejected |
 |---|---|---|
 | DTW, no context | 68% | – |
-| **CNN, 6 classes (shipped)** | **81%** | **80%** |
-| Shipped CNN on quiz takes | 91% (50/55) | – |
+| CNN, 6 classes (D53) | 81% | 80% |
+| D53 CNN on quiz takes | 91% (50/55) | – |
+| D53 recipe, late-night held-out blocks (D63 dev / locked) | 60% / 43% | – |
+| **D63 CNN (shipped), late-night held-out blocks (dev / locked)** | **80% / 53%** | – |
+| D63 CNN, daytime sessions held out entirely | 79% | – |
 | Live, different fit, no calibration | 38% | – |
 | Live, different fit, after calibration | 64% | – |
 

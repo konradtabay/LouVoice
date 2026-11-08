@@ -105,3 +105,4 @@
 11-08 05:43	proto_x	66.3	XS=70.0	69.2 63.5	proto.Proto(weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]))	
 11-08 05:47	arv_nw8_nosent	79.8	XS=76.4	78.8 80.8	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), filt=lambda t: not t['block'].startswith('sentence'))	feats.build(takes,'arv',channels=('a','r','v'))
 11-08 05:49	arv_nw8_cleansent	74.0	XS=78.2	73.1 75.0	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), filt=(lambda o: lambda t: not (t['block'].startswith('sentence') and o.get(t['id'],1) < 0.05))(__import__('json').load(open('oof.json'))))	feats.build(takes,'arv',channels=('a','r','v'))
+11-08 05:49	dtw_night	42.3	XS=nan	42.3	dtwknn.DTWkNN()	
