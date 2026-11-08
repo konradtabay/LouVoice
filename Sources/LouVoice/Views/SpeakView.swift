@@ -25,6 +25,7 @@ struct SpeakView: View {
                 }
                 SpeakAloudMenu()
             }
+            .zIndex(10)   // the open Speak aloud list draws over the card below (D59)
             // D55: the first time Speak is used in word mode, a short calibration comes first.
             if model.needsCalibration || model.needsSentenceCalibration || model.isCalibrating {
                 CalibrationCard().frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -14,7 +14,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 28) {
                     PageTitle(title: "Settings")
                     HStack(alignment: .top, spacing: 28) {
-                        VStack(spacing: 28) { VoiceCard(); SpeakingCard() }
+                        VStack(spacing: 28) { VoiceCard(); SpeakingCard().zIndex(1) }
                         VStack(spacing: 28) { PracticeCard(); AdvancedCard() }
                     }
                 }
@@ -98,6 +98,7 @@ private struct SpeakingCard: View {
                 Spacer()
                 SpeakAloudMenu(showsTitle: false)
             }
+            .zIndex(10)   // the open Speak aloud list draws over the rows below (D59)
             Toggle("AirPod stem turns speaking aloud on and off", isOn: Binding(
                 get: { model.stem.isEnabled }, set: { model.stem.setWanted($0) }))
                 .toggleStyle(LVToggleStyle())

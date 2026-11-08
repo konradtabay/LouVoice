@@ -100,8 +100,15 @@ final class VoiceService {
     /// <data dir>/VoiceCache — ~/Library/Application Support/LouVoice/VoiceCache unless LOUVOICE_DATA_DIR is set.
     private var cacheRoot: URL { DatasetStore.directory.appending(path: "VoiceCache", directoryHint: .isDirectory) }
 
+    /// ElevenLabs speed for sentences (D60). The flash model reads a whole sentence fast and clipped;
+    /// a little slower sounds like natural speech. Single words stay at normal speed, so they stay
+    /// snappy. TODO(team): tune by ear (0.7–1.2).
+    static let sentenceSpeed = 0.85
+    /// Speed for `text`: slower for a sentence (more than one word), normal for a word.
+    private func speed(for text: String) -> Double? { text.contains(" ") ? Self.sentenceSpeed : nil }
+
     private func cacheURL(_ text: String) -> URL? {
-        VoiceCache.cacheURL(text: text, voiceID: voiceID, modelID: settings.modelID, root: cacheRoot)
+        VoiceCache.cacheURL(text: text, voiceID: voiceID, modelID: settings.modelID, speed: speed(for: text), root: cacheRoot)
     }
 
     private func isCached(_ text: String) -> Bool {
@@ -303,8 +310,8 @@ final class VoiceService {
     /// (recorded in `lastError`, without the key).
     private func fetch(_ text: String) async -> URL? {
         guard let key = apiKey, let url = cacheURL(text),
-              let request = VoiceCache.request(text: text, voiceID: voiceID, apiKey: key,
-                                               modelID: settings.modelID, outputFormat: settings.outputFormat) else {
+              let request = VoiceCache.request(text: text, voiceID: voiceID, apiKey: key, modelID: settings.modelID,
+                                               outputFormat: settings.outputFormat, speed: speed(for: text)) else {
             lastError = "Add an ElevenLabs API key and voice ID first."
             return nil
         }

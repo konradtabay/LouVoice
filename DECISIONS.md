@@ -676,3 +676,27 @@ Swift implementation, k = 4: 46/120 → **77/120 (64%)**; hear 0 → 18/24, me 8
 - **Routing:** ElevenLabs clips use `AVAudioPlayer.currentDevice` and `AVQueuePlayer.audioOutputDeviceUniqueID`. The Mac voice fallback can't choose a device, so with a device chosen it's rendered to a short file (`AVSpeechSynthesizer.write`) and played the same way. That adds roughly 0.1–0.3 s. If the chosen device is disconnected, the system default is used, and the menu says "device not connected". Cue beeps still use the system default.
 
 **Not checked:** sound actually coming out of a non-default device (this Mac listed only its built-in speakers at the time).
+
+### D59: The Speak aloud dropdown is drawn in the site's style (2026-11-08). *Amends D58.*
+**Request:** The audio-output dropdown should look on theme.
+
+**Change:** `SpeakAloudMenu` no longer uses a system `Menu`, whose open list is a grey macOS menu that can't be styled. It now has:
+- a button that inverts to ink while open, with a rotating chevron;
+- a hand-drawn list below it: pearl paper, ink hairline, heart-purple offset shadow, square corners, an eyebrow heading "Speak my words on", and a device icon per row (AirPods, speakers, display);
+- a short description under Off and System default, a heart-purple tick on the current choice, and a faint ink wash on hover.
+
+Clicking outside the list or pressing Escape closes it. The rows that contain it (Speak top bar, Settings › Speaking) get a `zIndex` so the list draws over what's below.
+
+### D60: Slower ElevenLabs sentences; the Train/Speak signal preview zooms to jaw movement (2026-11-08)
+**Request:** Slow the ElevenLabs voice to a natural pace for sentences, and make the signal preview on Train and Speak big enough to see the signal change while speaking.
+
+**Sentence pace:**
+- Any multi-word text (a sentence) is requested with `voice_settings.speed = 0.85` (`VoiceService.sentenceSpeed`, `TODO(team)`: tune by ear within 0.7–1.2). This slows it without lowering the pitch.
+- Single words stay at normal speed, so they stay quick.
+- The speed is part of the cache key, so sentence clips made at the old speed aren't reused. Each sentence is fetched once at the new pace (live on first use, or when the voice cache is prepared), then cached. Word clips keep their old keys and aren't refetched.
+- New self-test: a slow request carries the speed, the slow clip has its own cache key, and speed 1 keeps the old key.
+
+**Signal preview:**
+- `SignalPreview` previously used the Signals page's fixed ±1.6 rad/s scale, where mouthing (0.1–0.2 rad/s, D43) was a near-flat line.
+- Each rotation axis is now centred on its mean over the 10 s window, and the scale follows the largest recent movement × 1.1, never tighter than ±0.12 rad/s (`SignalPreview.minRange`, `TODO(team)`), so rest noise (~0.02) stays a thin band.
+- The preview is 110 pt tall instead of 90. The Signals page keeps its fixed scale.

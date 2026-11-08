@@ -218,6 +218,15 @@ public enum SelfTests {
         let body = try r.httpBody.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: String] }
         try expect(body == ["text": "hello can you hear me", "model_id": "eleven_flash_v2_5"], "body is \(body ?? [:])")
         try expect(VoiceCache.request(text: "hi", voiceID: "", apiKey: key) == nil, "request built without a voice ID")
+        // D60: a slower sentence sends voice_settings.speed and is cached separately.
+        guard let slow = VoiceCache.request(text: "hello can you hear me", voiceID: "abc123", apiKey: key, speed: 0.85),
+              let slowBody = try slow.httpBody.flatMap({ try JSONSerialization.jsonObject(with: $0) as? [String: Any] }) else {
+            throw Failure(description: "no slow request built")
+        }
+        try expect((slowBody["voice_settings"] as? [String: Double])?["speed"] == 0.85, "speed is \(slowBody["voice_settings"] ?? "missing")")
+        try expect(VoiceCache.cacheKey(text: "hello can you hear me", speed: 0.85) != VoiceCache.cacheKey(text: "hello can you hear me"),
+                   "slow and normal clips share a cache key")
+        try expect(VoiceCache.cacheKey(text: "hello", speed: 1) == VoiceCache.cacheKey(text: "hello"), "speed 1 changed the cache key")
     }
 
     /// Runs everything, printing one line per check. Returns the failure count.

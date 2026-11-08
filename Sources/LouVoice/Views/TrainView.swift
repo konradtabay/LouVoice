@@ -27,15 +27,30 @@ struct TrainView: View {
 // MARK: Signal preview
 
 /// Small live rotation plot so the user can see the AirPods feel their jaw (Train and Speak).
+/// Mouthing moves the AirPods only ~0.1–0.2 rad/s, invisible on the Signals page's fixed ±1.6
+/// scale, so this preview zooms itself (D60): each axis is centred on its mean over the window, and
+/// the scale follows the largest recent movement, never tighter than `minRange` so resting noise
+/// stays small.
 struct SignalPreview: View {
     @Environment(AppModel.self) private var model
+    /// Narrowest scale, rad/s. Rest is ~0.02 (p90 0.05), word peaks 0.10–0.18 (D43). TODO(team).
+    static let minRange = 0.12
 
     var body: some View {
         let hub = model.hub
+        let samples = hub.history
+        let n = Double(max(samples.count, 1))
+        let mx = samples.reduce(0) { $0 + $1.rotation.x } / n
+        let my = samples.reduce(0) { $0 + $1.rotation.y } / n
+        let mz = samples.reduce(0) { $0 + $1.rotation.z } / n
+        let peak = samples.reduce(0.0) { m, s in
+            max(m, abs(s.rotation.x - mx), abs(s.rotation.y - my), abs(s.rotation.z - mz))
+        }
+        let range = max(Self.minRange, peak * 1.1)
         SignalPlot(title: "Signal", unit: hub.status == .streaming ? String(format: "%.0f Hz", hub.sampleRate) : "AirPods off",
-                   samples: hub.history, range: 1.6, channels: [
-                       ("x", LV.heart, { $0.rotation.x }), ("y", LV.violet, { $0.rotation.y }), ("z", LV.ink, { $0.rotation.z }),
-                   ], compact: true, height: 90)
+                   samples: samples, range: range, channels: [
+                       ("x", LV.heart, { $0.rotation.x - mx }), ("y", LV.violet, { $0.rotation.y - my }), ("z", LV.ink, { $0.rotation.z - mz }),
+                   ], compact: true, height: 110)
     }
 }
 
