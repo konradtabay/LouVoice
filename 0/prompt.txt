@@ -1,0 +1,1 @@
+<bash-input>xattr -d com.apple.quarantine /opt/homebrew/Caskroom/entire/0.13.1/entire</bash-input><bash-stdout>[No output was captured. The command ran in the terminal pane (tab 0); if it should have printed something, use read_terminal with tab_id "0" to check.]</bash-stdout><bash-stderr></bash-stderr>
