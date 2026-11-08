@@ -8,6 +8,7 @@ import { Section } from '@/components/site'
  */
 
 type Row = { week: string; word: string; strength: number; accuracy: number }
+type RealRow = { word: string; attempts: number; strength: number }
 
 // Distinct in lightness as well as hue, so lines stay apart without colour alone.
 const COLORS = ['#010101', '#3d1689', '#682bd7', '#bd2e95', '#a37cf0']
@@ -84,12 +85,17 @@ function LineChart({
 
 export default function ProgressChart() {
   const [rows, setRows] = useState<Row[] | null>(null)
+  const [real, setReal] = useState<RealRow[]>([])
 
   useEffect(() => {
     let alive = true
     fetch('/api/progress')
       .then((r) => (r.ok ? r.json() : null))
-      .then((d: { rows?: Row[] } | null) => alive && setRows(d?.rows?.length ? d.rows : []))
+      .then((d: { rows?: Row[]; real?: RealRow[] } | null) => {
+        if (!alive) return
+        setRows(d?.rows?.length ? d.rows : [])
+        setReal(d?.real ?? [])
+      })
       .catch(() => alive && setRows([]))
     return () => {
       alive = false
@@ -121,8 +127,15 @@ export default function ProgressChart() {
           </li>
         ))}
       </ul>
+      {real.length > 0 && (
+        <p className="mt-6 text-[17px] font-semibold">
+          Real data so far: {real.reduce((n, r) => n + r.attempts, 0)} mouthed words recorded by our team with AirPods, across{' '}
+          {real.length} words, at an average movement strength of{' '}
+          {(real.reduce((n, r) => n + r.strength * r.attempts, 0) / Math.max(real.reduce((n, r) => n + r.attempts, 0), 1)).toFixed(1)}×.
+        </p>
+      )}
       <p className="mt-4 text-[14px] text-ink/60">
-        Simulated 6-month progression for demonstration. Stored in Tiger Data (TimescaleDB hypertable and continuous aggregate).
+        Charts: simulated 6-month progression for demonstration. All data is stored in Tiger Data (TimescaleDB hypertable and continuous aggregate).
       </p>
     </Section>
   )

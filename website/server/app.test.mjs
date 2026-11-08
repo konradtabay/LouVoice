@@ -21,6 +21,9 @@ const db = {
       inserted.push(params[0])
       return { rows: [] }
     }
+    if (sql.includes("'team-real'")) {
+      return { rows: [{ word: 'hello', attempts: 12, strength: '6.4' }] }
+    }
     if (sql.includes('FROM word_weekly')) {
       return {
         rows: [
@@ -103,6 +106,25 @@ test('progress returns numbers and ISO dates', async () => {
   const body = await res.json()
   assert.equal(body.simulated, true)
   assert.deepEqual(body.rows[0], { week: '2026-05-01T00:00:00.000Z', word: 'hello', strength: 5.9, accuracy: 0.9 })
+  assert.deepEqual(body.real, [{ word: 'hello', attempts: 12, strength: 6.4 }])
+})
+
+test('export script turns app takes into real-data SQL', async () => {
+  const { toSql, strength } = await import('../scripts/export-takes.mjs')
+  const still = { rotation: [0.01, 0, 0], accel: [0.001, 0, 0] }
+  const moving = { rotation: [0.5, 0.2, 0], accel: [0.05, 0, 0] }
+  const samples = [still, still, still, still, moving, moving, still, still, still, still]
+  assert.ok(strength(samples) > 3)
+  const text = toSql({
+    takes: [
+      { label: "it's", createdAt: 0, samples },
+      { label: '_none', createdAt: 0, samples },
+      { label: 'hello can you', isSentence: true, createdAt: 0, samples },
+    ],
+  })
+  assert.match(text, /'2001-01-01T00:00:00.000Z', 'team-real', 'it''s'/) // Apple epoch + escaped quote
+  assert.doesNotMatch(text, /_none|hello can you/)
+  assert.equal(toSql({ takes: [] }), null)
 })
 
 test('wrong methods are refused', async () => {

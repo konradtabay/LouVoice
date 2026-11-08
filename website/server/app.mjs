@@ -137,6 +137,14 @@ export function createApp({ db, distDir, log = (m) => console.error(m) }) {
           WHERE user_id = 'alex-demo'
           ORDER BY week, word`,
       )
+      // Real takes recorded by the team (exported from the Mac app), summarised per word.
+      const real = await db.query(
+        `SELECT word, sum(attempts)::int AS attempts, avg(avg_strength) AS strength
+           FROM word_weekly
+          WHERE user_id = 'team-real'
+          GROUP BY word
+          ORDER BY word`,
+      )
       return send(res, 200, {
         ok: true,
         simulated: true,
@@ -146,6 +154,7 @@ export function createApp({ db, distDir, log = (m) => console.error(m) }) {
           strength: Number(r.avg_strength),
           accuracy: Number(r.accuracy),
         })),
+        real: real.rows.map((r) => ({ word: String(r.word), attempts: Number(r.attempts), strength: Number(r.strength) })),
       }, { 'Cache-Control': 'public, max-age=60' })
     } catch (err) {
       log(`progress query failed: ${err?.code ?? ''} ${err?.message ?? err}`)

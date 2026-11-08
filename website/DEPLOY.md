@@ -91,9 +91,42 @@ Re-run the upload command from step 3, then on the server:
 cd /root/website && npm install && npm run build && pm2 restart louvoice
 ```
 
-### Optional: a real domain
+### Optional: a real domain with HTTPS (about 15 min)
 
-Use the GoDaddy Registry code from the sponsor notes, then add an **A record** pointing to the Vultr IP. HTTPS needs a domain; with one, `apt install -y caddy`, set Caddy to reverse-proxy to the Node server on another port, and it gets a certificate automatically.
+1. Claim a domain with the GoDaddy Registry code from the sponsor notes. In its DNS settings add an **A record**: host `@`, value = the Vultr IP. Wait a few minutes.
+2. On the server, move Node off port 80 and put Caddy in front (it gets the HTTPS certificate by itself):
+
+   ```bash
+   pm2 delete louvoice
+   PORT=3000 pm2 start server/index.mjs --name louvoice && pm2 save
+   apt install -y caddy
+   echo 'YOURDOMAIN.com {
+     reverse_proxy localhost:3000
+   }' > /etc/caddy/Caddyfile
+   systemctl reload caddy
+   ufw allow 443
+   ```
+
+   (Run `read -s DATABASE_URL && export DATABASE_URL` again first if you've logged out since step 4.)
+3. Open `https://YOURDOMAIN.com`.
+
+## 4. Real data from the Mac app (optional, 5 min)
+
+Puts the team's real recorded takes into Tiger next to the simulated curve. Only the word, the time and one strength number leave the Mac, never raw motion.
+
+On the Mac that recorded the sessions, from the repo root:
+
+```bash
+node website/scripts/export-takes.mjs          # writes real-takes.sql
+```
+
+Open `real-takes.sql`, paste it into the Tiger SQL editor, select all, **Run selection** once. Then run this on its own:
+
+```sql
+CALL refresh_continuous_aggregate('word_weekly', NULL, NULL);
+```
+
+The `/caregivers` page then shows a "Real data so far" line under the charts. Don't commit `real-takes.sql`.
 
 ---
 
