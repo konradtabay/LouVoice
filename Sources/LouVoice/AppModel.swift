@@ -462,7 +462,7 @@ final class AppModel {
                 self.isCalibrating = false
                 return
             }
-            let features = PipelineConfig.defaults.features
+            let features = base.featureConfig
             let calib = self.dataset.takes.filter { $0.block.hasPrefix("calibrate-") && $0.createdAt >= started }
                 .compactMap { t in Features.extract(t.samples, config: features).map { ($0.sequence, t.label) } }
             let pool = self.dataset.trainingTakes.filter { base.labels.contains($0.label) && !$0.block.hasPrefix("calibrate-") }

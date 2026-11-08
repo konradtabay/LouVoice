@@ -52,7 +52,9 @@ def load(raw=False):
         if len(x) < 4: continue
         d = dict(id=t["id"], label=t["label"], y=LABELS.index(t["label"]) if t["label"] in LABELS else 6 + AUX_LABELS.index(t["label"]), block=t["block"], quiz=t["test"], x=x,
                  created=created[t["id"]], night=created[t["id"]] >= NIGHT_START)
-        if raw and t["id"] in rawmap: d["raw"], d["t"], d["created"] = rawmap[t["id"]]
+        if raw and t["id"] in rawmap:
+            d["raw"], d["t"], _ = rawmap[t["id"]]
+            o = np.argsort(d["t"]); d["grest"] = d["raw"][o][:15, 6:9].mean(0)
         takes.append(d)
     _cache[key] = takes
     return takes

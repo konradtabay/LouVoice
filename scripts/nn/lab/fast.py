@@ -31,7 +31,10 @@ def warp_crop(X, n, T, lo, hi, g, center=False):
     m = torch.clamp((n.float() * u).round(), min=4)                       # warped length
     step = (n.float() - 1) / (m - 1).clamp(min=1)                          # source frames per output frame
     r = torch.rand(B, generator=g) if not center else torch.full((B,), 0.5)
-    off = torch.where(m >= T, -(r * (m - T + 1)).floor(), (r * (T - m + 1)).floor() if not center else ((T - m) / 2).floor())
+    if center:  # same as CNNWordModel.input in Swift: start (n - T) / 2 when longer, offset (T - n) / 2 when shorter
+        off = torch.where(m >= T, -((m - T) / 2).floor(), ((T - m) / 2).floor())
+    else:
+        off = torch.where(m >= T, -(r * (m - T + 1)).floor(), (r * (T - m + 1)).floor())
     j = torch.arange(T).float()[None]
     k = j - off[:, None]                                                   # index in warped sequence
     valid = (k >= 0) & (k <= m[:, None] - 1)
@@ -172,6 +175,23 @@ class Fast:
         created = torch.tensor([t["created"] for t in takes], dtype=torch.float64)
         self._created, self._X, self._n = created, X, n
 
+        grest = torch.tensor(np.stack([t.get("grest", np.zeros(3)) for t in takes]), dtype=torch.float64)
+
+        def adapt_w(w, r):
+            import copy
+            out = []
+            for k, base in enumerate(nets):
+                net = copy.deepcopy(base); g = torch.Generator().manual_seed(2000 + k)
+                opt = torch.optim.AdamW(net.parameters(), lr=r.get("lr", 5e-4), weight_decay=c["wd"]); net.train()
+                for st in range(r.get("steps", 150)):
+                    bi = torch.cat([torch.multinomial(w, r.get("bs", 32), replacement=True, generator=g),
+                                    torch.randint(0, len(takes), (int(r.get("bs", 32) * r.get("replay", 1.0)),), generator=g)])
+                    A, M = self.augment(X[bi], n[bi], g)
+                    l = F.cross_entropy(net(A.to(DEV), M.to(DEV)), y[bi].to(DEV), weight=cw.to(DEV), label_smoothing=c["smooth"])
+                    opt.zero_grad(); l.backward(); opt.step()
+                net.eval(); out.append(net)
+            return out
+
         def adapt(T0):
             """Causal recency fine-tune: copies of the nets, trained on takes recorded before T0,
             sampled with weight exp(-(T0 - t) / tau) and mixed with uniform replay."""
@@ -196,6 +216,17 @@ class Fast:
             return out
 
         def predict(test):
+            if c.get("fitmatch"):
+                r = c["fitmatch"]; order = sorted(range(len(test)), key=lambda i: test[i]["created"]); groups, cur = [], [order[0]]
+                for i in order[1:]:
+                    if test[i]["created"] - test[cur[-1]]["created"] > 600: groups.append(cur); cur = [i]
+                    else: cur.append(i)
+                groups.append(cur); P = np.zeros((len(test), 6))
+                for gi in groups:
+                    g0 = torch.tensor(np.mean([test[i]["grest"] for i in gi], 0), dtype=torch.float64)
+                    w = torch.exp(-((grest - g0) ** 2).sum(1) / (2 * r.get("sigma", 0.05) ** 2)).float()
+                    P[gi] = run([test[i] for i in gi], adapt_w(w, r))
+                return P
             if c.get("rec"):
                 order = sorted(range(len(test)), key=lambda i: test[i]["created"]); groups, cur = [], [order[0]]
                 for i in order[1:]:

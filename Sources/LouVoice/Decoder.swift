@@ -134,7 +134,7 @@ final class Decoder {
             // D53: the CNN decides single words when it knows every word that may come out.
             // Otherwise (e.g. a newly taught word) the DTW classifier below is used, as before.
             if let cnn = self.cnnForWordMode(active: active),
-               let cnnFeatures = Features.extract(samples, config: PipelineConfig.defaults.features) {
+               let cnnFeatures = Features.extract(samples, config: cnn.featureConfig) {
                 await self.finishWord(prediction: await Task.detached(priority: .userInitiated) {
                     Self.cnnPrediction(cnn, cnnFeatures.sequence, allowed: active)
                 }.value, motionBest: nil, samples: samples, features: features, simWord: simWord,
