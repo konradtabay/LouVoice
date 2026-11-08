@@ -22,6 +22,7 @@ public enum SelfTests {
         ("dataset samples round-trip through JSON", codable),
         ("voice cache: same text → same path, other voice/text → other path", voiceCachePaths),
         ("voice cache: ElevenLabs request has the right URL, headers and body", voiceCacheRequest),
+        ("word CNN: a calibration only applies to the weights it was made for", cnnCalibrationIdentity),
     ]
 
     static func resampling() throws {
@@ -245,5 +246,34 @@ public enum SelfTests {
         }
         log(failures == 0 ? "All \(all.count) checks passed." : "\(failures) of \(all.count) checks failed.")
         return failures
+    }
+
+    /// Tiny 4-layer weights file (width 2, 2 input channels, 6 labels) in the training script's format.
+    static func tinyCNN(id: String?, channels: [String]? = nil) throws -> CNNWordModel {
+        func t(_ n: Int, _ v: Double = 0.1) -> [Double] { [Double](repeating: v, count: n) }
+        var state: [String: Any] = [:]
+        let ks = [5, 5, 5, 3]
+        for (i, k) in ks.enumerated() {
+            state["convs.\(i).weight"] = t(2 * 2 * k); state["convs.\(i).bias"] = t(2)
+            state["norms.\(i).weight"] = t(2, 1); state["norms.\(i).bias"] = t(2, 0)
+            state["norms.\(i).running_mean"] = t(2, 0); state["norms.\(i).running_var"] = t(2, 1)
+        }
+        state["head.weight"] = t(6 * 5); state["head.bias"] = t(6, 0)
+        var root: [String: Any] = ["labels": ["hello", "can", "you", "hear", "me", "_none"], "T": 8,
+                                   "members": [["scale": [1.0, 1.0], "state": state]]]
+        if let id { root["id"] = id }
+        if let channels { root["channels"] = channels }
+        return try CNNWordModel(data: JSONSerialization.data(withJSONObject: root))
+    }
+
+    static func cnnCalibrationIdentity() throws {
+        let old = try tinyCNN(id: nil), new = try tinyCNN(id: "d62-a", channels: ["acceleration", "rotation", "attitude"])
+        try expect(old.channels == PipelineConfig.defaults.features.channels, "file without channels should use the defaults")
+        try expect(new.featureConfig.channels == [.acceleration, .rotation, .attitude], "channels not read from the file")
+        try expect((try? old.applying(calibration: old.calibrationData())) != nil, "pre-D62 calibration no longer loads")
+        try expect((try? new.applying(calibration: new.calibrationData())) != nil, "own calibration rejected")
+        try expect((try? new.applying(calibration: old.calibrationData())) == nil, "old model's calibration applied to new weights")
+        try expect((try? old.applying(calibration: new.calibrationData())) == nil, "new model's calibration applied to old weights")
+        try expect((try? try tinyCNN(id: "d62-b").applying(calibration: new.calibrationData())) == nil, "calibration applied across model ids")
     }
 }

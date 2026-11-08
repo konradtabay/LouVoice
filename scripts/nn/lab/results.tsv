@@ -99,3 +99,6 @@
 11-08 05:17	fit_x_s05	67.3	XS=80.9	69.2 65.4	fast.Fast(fitmatch=dict(sigma=0.05, steps=150, lr=5e-4))	
 11-08 05:17	gtilt_arv_nw8	75.0	XS=64.5	75.0 75.0	fast.Fast(xkey='arvt', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]))	feats.build(takes,'arvt',channels=('a','r','v'),extra=('gravity_tilt',))
 11-08 05:17	E_arv_x5	76.9	XS=83.6	80.8 73.1	ens.Ens(fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts])), fast.Fast(members=5))	feats.build(takes,'arv',channels=('a','r','v')); tnorm.build(takes,'arv')
+11-08 05:20	mix_arv_nw8_p8	66.3	XS=69.1	67.3 65.4	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), net=lambda d: nets.MixCNN(d, p=0.8, alpha=0.3, layers_mix=3))	feats.build(takes,'arv',channels=('a','r','v'))
+11-08 05:26	mix_x	70.2	XS=77.3	67.3 73.1	fast.Fast(net=lambda d: nets.MixCNN(d))	
+11-08 05:33	E_arv_tn_x5	78.8	XS=82.7	80.8 76.9	ens.Ens(fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts])), fast.Fast(xkey='arv_n32', VD=9, T=36, warp=(0.9,1.1), weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts])), fast.Fast(members=5))	feats.build(takes,'arv',channels=('a','r','v')); tnorm.build(takes,'arv')

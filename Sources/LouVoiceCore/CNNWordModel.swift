@@ -18,6 +18,9 @@ public struct CNNWordModel: Sendable {
     /// Feature channels the network was trained on (weights file key "channels", e.g. ["acceleration",
     /// "rotation", "attitude"]). Older files have none: the default pipeline's rotation + attitude.
     public let channels: FeatureChannels
+    /// The weights file's "id" (nil for files from before D62). A saved calibration records it and is only
+    /// applied to the same weights, so a new model never inherits statistics measured for an old one.
+    public let modelID: String?
     /// The pipeline settings to extract this network's input with: the defaults, with `channels`.
     public var featureConfig: FeatureConfig {
         var c = PipelineConfig.defaults.features
@@ -63,6 +66,7 @@ public struct CNNWordModel: Sendable {
         else { throw LoadError.badFormat("missing labels / T / members") }
         self.labels = labels
         self.T = T
+        self.modelID = root["id"] as? String
         if let names = root["channels"] as? [String] {
             var c: FeatureChannels = []
             for n in names {
@@ -319,13 +323,16 @@ public struct CNNWordModel: Sendable {
         let ms: [[String: Any]] = members.map { m in
             ["means": m.convs.map(\.mean), "vars": m.convs.map(\.variance), "headW": m.headW, "headB": m.headB]
         }
-        return try JSONSerialization.data(withJSONObject: ["labels": labels, "members": ms])
+        var root: [String: Any] = ["labels": labels, "members": ms]
+        if let modelID { root["model"] = modelID }
+        return try JSONSerialization.data(withJSONObject: root)
     }
 
     /// The model with a saved calibration applied. Throws if it doesn't fit this model.
     public func applying(calibration data: Data) throws -> CNNWordModel {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (root["labels"] as? [String]) == labels, let ms = root["members"] as? [[String: Any]], ms.count == members.count
+              (root["labels"] as? [String]) == labels, let ms = root["members"] as? [[String: Any]], ms.count == members.count,
+              (root["model"] as? String) == modelID
         else { throw LoadError.badFormat("calibration doesn't match the model") }
         var copy = self
         for (i, d) in ms.enumerated() {

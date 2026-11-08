@@ -35,7 +35,7 @@ members = [{"scale": fit.scale.tolist(), "state": {k: v.detach().cpu().numpy().t
                                                    if not k.endswith("num_batches_tracked")}} for net in fit.nets]
 out = {"model": "cnn", "variant": "dedicated", "labels": H.LABELS, "T": fit.c["T"],
        "channels": ["acceleration", "rotation", "attitude"], "members": members,
-       "recipe": "scripts/nn/lab/ship.py (D62)"}
+       "recipe": "scripts/nn/lab/ship.py (D62)", "id": "d62-" + __import__("time").strftime("%Y%m%d-%H%M%S")}
 json.dump(out, open(a.out, "w"))
 print("wrote", os.path.abspath(a.out))
 
