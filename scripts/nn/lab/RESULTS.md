@@ -55,6 +55,12 @@ In the app this is `Decoder.cnnMinConfidence` (currently 0, always answers): "No
 - Short-time spectral magnitudes as input: 59.8 combined.
 - Random search over 16 training hyperparameters (learning rate, weight decay, smoothing, dropout, width, window, augmentation ranges, night weight; running continuously): best so far 78.0 combined, i.e. the defaults are near a local optimum.
 
+## How much the numbers can be trusted
+- DEV + XS is 107 takes: at ~80% accuracy the standard error is about ±4 points, so only changes of 5+ points are real.
+- Seed-to-seed spread is ~3 points: the shipped recipe scored 79.4 combined on seeds 0–1 and 76.2 on seeds 2–3.
+- The random search's best configs (80.4 on seeds 0–1) re-tested on seeds 2–3 at 76.6 and 77.1, the same as the shipped recipe (76.2): winner's curse. The shipped model was kept.
+- So the only changes that clearly cleared the noise were dropping `confirmed-*` takes (+10), and the accelerometer channels with late-session weighting (+10 on DEV, +4 on LOCKED).
+
 ## Shipped (D63)
 `ship.py`: accelerometer + rotation + attitude, latest session ×8, 5 networks, every take except `confirmed-*` (locked blocks included, as for any real model). Locked score of the recipe (trained without the locked blocks): **53.3%** (D53 recipe: 43.3%).
 
