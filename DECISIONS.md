@@ -738,6 +738,8 @@ Clicking outside the list or pressing Escape closes it. The rows that contain it
 | Same, without `confirmed-*` takes | 70.2% | 85.5% | 49.2% |
 | **Shipped: + accelerometer channels, latest-session takes ×8, 5 networks** | **79.8%** | 79.1% | **53.3%** |
 
+Non-word movement (`_none`, each block held out): rejected 75% (43/57), vs 79% (45/57) for the same recipe without the accelerometer and night weighting, a two-take difference.
+
 95% was not reached. About 70 other variants (augmentation, normalisation, architectures, synthetic takes, label cleaning, session adaptation, ensembles, a random search) are listed in `scripts/nn/lab/RESULTS.md`; none beat this by more than noise on DEV + XS. Even with half of a late-night block in training, the other half only reaches ~77%: those takes are mouthed ~40–50% smaller ("you", "hear", "me") and vary more.
 
 **Changes:**
