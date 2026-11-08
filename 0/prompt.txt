@@ -1,0 +1,1 @@
+ok check the data now, make improvements then ill run the training again
