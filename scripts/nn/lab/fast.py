@@ -69,6 +69,12 @@ class Fast:
         X = X * torch.exp(torch.empty(B, 1, 1).uniform_(math.log(lo), math.log(hi), generator=g))
         if c["chan_gain"]:
             X = X * torch.exp(torch.randn(B, 1, D, generator=g) * c["chan_gain"])
+        if c.get("snr"):  # weaker mouthing at the same sensor noise floor: scale down, add floor-level noise
+            p, lo, hi = c["snr"]
+            pick = (torch.rand(B, 1, 1, generator=g) < p).float()
+            k = torch.empty(B, 1, 1).uniform_(lo, hi, generator=g)
+            fl = self._floor.view(1, 1, -1)
+            X = pick * (X * k + torch.randn(X.shape, generator=g) * fl * torch.sqrt(1 - k ** 2)) + (1 - pick) * X
         out, M = warp_crop(X, n, c["T"], *c["warp"], g)
         if c["jitter"]:
             sd = (out.pow(2).sum(1) / M.sum(1, keepdim=True).clamp(min=1)).sqrt()[:, None]
@@ -122,6 +128,12 @@ class Fast:
         xs = [t[xk] for t in takes]; y = torch.tensor([t["y"] for t in takes])
         scale = np.concatenate(xs).std(0) + 1e-6
         X, n = pad([x / scale for x in xs])
+        # per-channel sensor noise floor (scaled units): spread of each take's quietest 20% frames, median over takes
+        fl = []
+        for x in xs:
+            z = x / scale; e = np.abs(z).sum(1); q = z[e <= np.quantile(e, 0.2)]
+            if len(q) >= 2: fl.append(q.std(0))
+        self._floor = torch.tensor(np.median(fl, 0) if fl else np.zeros(X.shape[2]), dtype=torch.float32)
         bank = None
         if c.get("xaug"):  # precomputed physical variants: (N, V+1, L, D), slot 0 = original
             Vn = max(len(t[xk + "_aug"]) for t in takes); L = max(X.shape[1], max(len(v) for t in takes for v in t[xk + "_aug"]))
@@ -143,6 +155,8 @@ class Fast:
             net.train(); swa = None
             for ep in range(c["epochs"]):
                 idx = torch.randperm(len(xs), generator=g)
+                if c.get("oversample"):  # draw the epoch by weight instead of weighting the loss
+                    idx = torch.multinomial(sw, len(xs), replacement=True, generator=g)
                 for b in range(0, len(idx), c["bs"]):
                     bi = idx[b:b + c["bs"]]
                     if len(bi) < 2: continue
@@ -165,7 +179,7 @@ class Fast:
                             (1 - lam) * F.cross_entropy(logits, yb[perm], weight=cwd, label_smoothing=c["smooth"], reduction="none")
                     else:
                         l = F.cross_entropy(net(A, M), yb, weight=cwd, label_smoothing=c["smooth"], reduction="none")
-                    loss = (l * wb).sum() / wb.sum()
+                    loss = l.mean() if c.get("oversample") else (l * wb).sum() / wb.sum()
                     opt.zero_grad(); loss.backward(); opt.step(); sched.step()
                 if c.get("swa") and ep >= int(c["epochs"] * (1 - c["swa"])):
                     if swa is None:

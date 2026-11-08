@@ -110,3 +110,7 @@
 11-08 05:53	arv_nw8_sent_half	77.9	XS=80.0	75.0 80.8	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([(8.0 if t['night'] else 1.0) * (0.5 if t['block'].startswith('sentence') else 1.0) for t in ts]))	feats.build(takes,'arv',channels=('a','r','v'))
 11-08 05:57	swa_arv_nw8	78.8	XS=78.2	78.8 78.8	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), swa=0.3)	feats.build(takes,'arv',channels=('a','r','v'))
 11-08 06:00	swa_arv_nw8_ep150	74.0	XS=78.2	73.1 75.0	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), swa=0.4, epochs=150)	feats.build(takes,'arv',channels=('a','r','v'))
+11-08 06:02	swa_x	69.2	XS=83.6	69.2 69.2	fast.Fast(swa=0.3)	
+11-08 06:03	E_arv_tn	80.8	XS=80.0	82.7 78.8	ens.Ens(fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts])), fast.Fast(xkey='arv_n32', VD=9, T=36, warp=(0.9,1.1), weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts])))	feats.build(takes,'arv',channels=('a','r','v')); tnorm.build(takes,'arv')
+11-08 06:14	snr_arv_nw8_p3	79.8	XS=78.2	82.7 76.9	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), snr=(0.3, 0.5, 0.9))	feats.build(takes,'arv',channels=('a','r','v'))
+11-08 06:14	snr_arv_nw8	74.0	XS=75.5	75.0 73.1	fast.Fast(xkey='arv', VD=9, weight_fn=lambda ts: np.array([8.0 if t['night'] else 1.0 for t in ts]), snr=(0.5, 0.4, 0.8))	feats.build(takes,'arv',channels=('a','r','v'))
