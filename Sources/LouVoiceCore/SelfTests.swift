@@ -270,7 +270,7 @@ public enum SelfTests {
         let old = try tinyCNN(id: nil), new = try tinyCNN(id: "d62-a", channels: ["acceleration", "rotation", "attitude"])
         try expect(old.channels == PipelineConfig.defaults.features.channels, "file without channels should use the defaults")
         try expect(new.featureConfig.channels == [.acceleration, .rotation, .attitude], "channels not read from the file")
-        try expect((try? old.applying(calibration: old.calibrationData())) != nil, "pre-D62 calibration no longer loads")
+        try expect((try? old.applying(calibration: old.calibrationData())) != nil, "pre-D63 calibration no longer loads")
         try expect((try? new.applying(calibration: new.calibrationData())) != nil, "own calibration rejected")
         try expect((try? new.applying(calibration: old.calibrationData())) == nil, "old model's calibration applied to new weights")
         try expect((try? old.applying(calibration: new.calibrationData())) == nil, "new model's calibration applied to old weights")

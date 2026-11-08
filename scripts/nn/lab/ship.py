@@ -5,7 +5,7 @@
 Recipe (scripts/nn/lab/RESULTS.md):
 - every isolated take of hello/can/you/hear/me/_none, quiz and calibration takes included; never `confirmed-*`
   (their labels came from the model's own guess);
-- input: accelerometer + rotation + attitude (`"channels"` in the file; the app extracts the same, D62);
+- input: accelerometer + rotation + attitude (`"channels"` in the file; the app extracts the same, D63);
 - takes from the latest session (recorded within --recent-hours of the newest take) weighted --recent-weight x;
 - the shipped CNN architecture and augmentation (fast.py defaults), several members averaged.
 """
@@ -35,7 +35,7 @@ members = [{"scale": fit.scale.tolist(), "state": {k: v.detach().cpu().numpy().t
                                                    if not k.endswith("num_batches_tracked")}} for net in fit.nets]
 out = {"model": "cnn", "variant": "dedicated", "labels": H.LABELS, "T": fit.c["T"],
        "channels": ["acceleration", "rotation", "attitude"], "members": members,
-       "recipe": "scripts/nn/lab/ship.py (D62)", "id": "d62-" + __import__("time").strftime("%Y%m%d-%H%M%S")}
+       "recipe": "scripts/nn/lab/ship.py (D63)", "id": "d63-" + __import__("time").strftime("%Y%m%d-%H%M%S")}
 json.dump(out, open(a.out, "w"))
 print("wrote", os.path.abspath(a.out))
 

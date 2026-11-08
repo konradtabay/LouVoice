@@ -18,7 +18,7 @@ public struct CNNWordModel: Sendable {
     /// Feature channels the network was trained on (weights file key "channels", e.g. ["acceleration",
     /// "rotation", "attitude"]). Older files have none: the default pipeline's rotation + attitude.
     public let channels: FeatureChannels
-    /// The weights file's "id" (nil for files from before D62). A saved calibration records it and is only
+    /// The weights file's "id" (nil for files from before D63). A saved calibration records it and is only
     /// applied to the same weights, so a new model never inherits statistics measured for an old one.
     public let modelID: String?
     /// The pipeline settings to extract this network's input with: the defaults, with `channels`.

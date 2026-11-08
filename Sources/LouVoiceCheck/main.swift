@@ -168,7 +168,7 @@ if let i = args.firstIndex(of: "--eval"), i + 1 < args.count {
     // and quiz), for training models outside Swift on exactly what the recogniser sees.
     if let j = args.firstIndex(of: "--export-features"), j + 1 < args.count {
         var config = PipelineConfig.defaults.features
-        // --channels arv: accelerometer + rotation + attitude (the word CNN's input since D62).
+        // --channels arv: accelerometer + rotation + attitude (the word CNN's input since D63).
         if let c = args.firstIndex(of: "--channels"), c + 1 < args.count, args[c + 1] == "arv" {
             config.channels = [.acceleration, .rotation, .attitude]
         }
