@@ -8,7 +8,7 @@ p.add_argument("--none", action="store_true"); p.add_argument("--seeds", default
 p.add_argument("--keep-confirmed", action="store_true"); p.add_argument("--xs", action="store_true"); p.add_argument("--setup", default="")
 a = p.parse_args()
 import torch; torch.set_num_threads(a.threads)
-import numpy as np, harness as H, cnn, fast, feats, nets, rocket, pseudo, running, ens, synth, tnorm, align, proto, dtwknn
+import numpy as np, harness as H, cnn, fast, feats, nets, rocket, pseudo, running, ens, synth, tnorm, align, proto, dtwknn, spec
 if a.setup:
     takes = H.load(a.raw); exec(a.setup)
 fit = eval(a.expr)

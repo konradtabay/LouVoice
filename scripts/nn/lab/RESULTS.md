@@ -50,6 +50,9 @@ In the app this is `Decoder.cnnMinConfidence` (currently 0, always answers): "No
 - DTW template matching against late-night takes: 42 dev.
 - Training without sentence-cut takes, without flagged sentence cuts, or with sentence cuts at half weight: 76–79 combined.
 - Stochastic weight averaging: 76–78.5 combined.
+- Weak-mouthing synthesis (scale a take down and add noise at the measured sensor noise floor): 74.8–79.0 combined.
+- Oversampling late-night takes instead of loss-weighting them: 77.1–78.0 combined.
+- Short-time spectral magnitudes as input: 59.8 combined.
 - Random search over 16 training hyperparameters (learning rate, weight decay, smoothing, dropout, width, window, augmentation ranges, night weight; running continuously): best so far 78.0 combined, i.e. the defaults are near a local optimum.
 
 ## Shipped (D63)
