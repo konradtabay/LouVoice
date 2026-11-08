@@ -53,6 +53,7 @@ In the app this is `Decoder.cnnMinConfidence` (currently 0, always answers): "No
 - Weak-mouthing synthesis (scale a take down and add noise at the measured sensor noise floor): 74.8–79.0 combined.
 - Oversampling late-night takes instead of loss-weighting them: 77.1–78.0 combined.
 - Short-time spectral magnitudes as input: 59.8 combined.
+- Deeper CNN (6 layers, dilation up to 8): 78.5 combined; with a 64-frame window 75.7.
 - Random search over 16 training hyperparameters (learning rate, weight decay, smoothing, dropout, width, window, augmentation ranges, night weight; running continuously): best so far 78.0 combined, i.e. the defaults are near a local optimum.
 
 ## How much the numbers can be trusted
