@@ -11,11 +11,11 @@ struct CaptureSettings: Codable, Hashable {
 
 @MainActor @Observable
 final class AppModel {
-    /// The three tabs the user sees, plus Settings (opened from the gear). TODO(team): "Speak" is the "use" tab.
+    /// The four tabs the user sees, plus Settings (opened from the gear). TODO(team): "Speak" is the "use" tab.
     enum Screen: String, CaseIterable, Identifiable {
-        case signals = "Signals", train = "Train", speak = "Speak", settings = "Settings"
+        case signals = "Signals", train = "Train", speak = "Speak", history = "History", settings = "Settings"
         var id: String { rawValue }
-        static let tabs: [Screen] = [.signals, .train, .speak]
+        static let tabs: [Screen] = [.signals, .train, .speak, .history]
     }
 
     /// Settings › Advanced: the original full screens, kept intact for caregivers and the team.

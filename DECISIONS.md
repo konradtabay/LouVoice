@@ -592,3 +592,13 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 **Fix:** `StemPress.claimNowPlaying()` sets that full info. It runs on enable, again 1.5 s later (a claim made while the app is still opening can be ignored), whenever LouVoice comes to the front, and after every stem press, so the pause command a press sends doesn't leave LouVoice "paused".
 
 **Checked:** Spotify paused, then LouVoice launched: LouVoice holds now playing at 1, 3, 6 and 10 s. Spotify brought to the front, then LouVoice again: LouVoice reclaims it. **Not checked:** a physical stem press (needs a person).
+
+### D54: History tab with simulated deterioration (2026-11-07)
+**Request:** A simple "History" tab showing decline over time, as ALS progresses: two line graphs, movement strength and accuracy, with simulated data.
+
+**Changes:**
+- New tab **History** (`HistoryView`), after Speak. It shows two summary cards (now vs. first week) and two Swift Charts line graphs: **movement strength** (% of the first week) and **accuracy** (% of practice words right). The strength chart has a dashed "Too weak to read reliably" line at 45% (`HistoryData.weakLevel`, `TODO(team)`).
+- **Simulated data**, labelled on screen: 39 weekly points over about nine months, deterministic (SplitMix64 seed 7). Strength = 100 − 52·t^1.35 ± 2.5. Accuracy holds near 95% until strength falls below 80%, then drops about 1 point per point of strength lost (± 2). It ends around 47% strength and 59% accuracy.
+- **Header:** the tabs now share the row with the logo and buttons (flexible space either side) instead of a centred overlay, because four tabs plus Help and Settings overlapped the AirPods dot.
+
+**Next (`TODO(team)`):** replace the simulation with real numbers per session: average take strength (the quality gate's motion energy) relative to the first block, and held-out accuracy per training block.

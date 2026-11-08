@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// App shell styled like the landing page header: wordmark left, three tabs centred with an ink
+/// App shell styled like the landing page header: wordmark left, four tabs centred with an ink
 /// underline on the active one, Settings on the right.
 struct ContentView: View {
     @Environment(AppModel.self) private var model
@@ -30,6 +30,7 @@ struct ContentView: View {
                 case .signals: SignalsView()
                 case .train: TrainView()
                 case .speak: SpeakView()
+                case .history: HistoryView()
                 case .settings: SettingsView()
                 }
             }
@@ -51,7 +52,14 @@ private struct Header: View {
             Button { model.devMode = true } label: { Wordmark() }
                 .buttonStyle(.plain)
                 .help("Dev mode")
-            Spacer()
+            // Tabs share the row with the sides (equal flexible space either side), so with four
+            // tabs plus Help and Settings they can't run into the AirPods dot.
+            Spacer(minLength: 24)
+            HStack(spacing: 36) {
+                ForEach(AppModel.Screen.tabs) { tab in TabLink(tab: tab) }
+            }
+            .fixedSize()
+            Spacer(minLength: 24)
             LiveIndicator().fixedSize()
             Button { model.showOnboarding = true } label: {
                 Label("Help", systemImage: "questionmark.circle").labelStyle(.titleAndIcon)
@@ -65,12 +73,6 @@ private struct Header: View {
             .lvButton(model.screen == .settings ? .primary : .outline)
             .fixedSize()
             .keyboardShortcut(",", modifiers: .command)
-        }
-        // Tabs sit on their own layer so they stay centred whatever the side widths are.
-        .overlay {
-            HStack(spacing: 48) {
-                ForEach(AppModel.Screen.tabs) { tab in TabLink(tab: tab) }
-            }
         }
         .padding(.horizontal, 32)
         .frame(height: 84)
