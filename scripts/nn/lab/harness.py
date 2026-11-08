@@ -83,7 +83,7 @@ def dev(fit, name="", raw=False, drop_confirmed=True, seed=0, verbose=True):
         print(f"DEV {name}: {acc*100:.1f}% ({sum(p == t['y'] for p, t in zip(preds, tests))}/{len(tests)})  "
               + " ".join(f"{w}={v*100:.0f}" for w, v in per.items()) + f"  said_none={nonepred*100:.0f}%", flush=True)
     with open(os.path.join(HERE, "dev_log.jsonl"), "a") as fh:
-        fh.write(json.dumps(dict(time=time.strftime("%H:%M:%S"), name=name, dev=acc, per=per)) + "\n")
+        if name != "search": fh.write(json.dumps(dict(time=time.strftime("%H:%M:%S"), name=name, dev=acc, per=per)) + "\n")
     return acc
 
 

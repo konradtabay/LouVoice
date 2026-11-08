@@ -48,3 +48,28 @@ class ResCNN(nn.Module):
         for c, n, se in zip(self.convs, self.norms, self.se):
             y = F.gelu(n(c(h))); y = y * se(y.mean(2)).unsqueeze(2); h = h + y
         return self.head(self.drop(pool(h.transpose(1, 2), mask)))
+
+
+from cnn import CNN as _CNN
+
+
+class MixCNN(_CNN):
+    """The shipped CNN plus MixStyle (Zhou et al. 2021) after the first `layers_mix` conv layers, training only:
+    each take's per-channel (masked) mean/std is mixed with another take's. Inference is the plain CNN,
+    so the weights export unchanged."""
+    def __init__(self, d, k=6, w=64, drop=0.3, layers=4, p=0.5, alpha=0.1, layers_mix=2):
+        super().__init__(d, k, w, drop, layers); self.p, self.alpha, self.lm = p, alpha, layers_mix
+
+    def embed(self, x, mask):
+        h = x.transpose(1, 2); m = mask.unsqueeze(1); cnt = m.sum(2, keepdim=True).clamp(min=1)
+        for i, (c, n) in enumerate(zip(self.convs, self.norms)):
+            y = F.gelu(n(c(h))); h = y if i == 0 else h + y
+            if self.training and i < self.lm and torch.rand(1).item() < self.p:
+                mu = (h * m).sum(2, keepdim=True) / cnt
+                sig = (((h - mu) ** 2 * m).sum(2, keepdim=True) / cnt + 1e-6).sqrt()
+                perm = torch.randperm(h.shape[0], device=h.device)
+                lam = torch.distributions.Beta(self.alpha, self.alpha).sample((h.shape[0], 1, 1)).to(h.device)
+                mu2, sig2 = lam * mu + (1 - lam) * mu[perm], lam * sig + (1 - lam) * sig[perm]
+                h = ((h - mu) / sig * sig2 + mu2) * m + h * (1 - m)
+        avg = (h * m).sum(2) / m.sum(2).clamp(min=1); mx = (h + (m - 1) * 1e4).amax(2)
+        return torch.cat([avg, mx, mask.sum(1, keepdim=True) / 50.0], 1)

@@ -27,6 +27,22 @@ Goal: single-word accuracy 95%+ (hello, can, you, hear, me; `_none` counts as wr
 - Time-normalising each take to a fixed length: worse.
 - 50 Hz, no trimming, looser trimming, high-pass 0.4/2.0/2.5 Hz: no better.
 
+## Selective accuracy (answer only when confident; DEV + XS, 107 takes, ensemble of the two best models)
+| Confidence ≥ | Answers | Right when answering |
+|---|---|---|
+| (always answer) | 100% | 82.2% |
+| 0.5 | 65% | 90.0% |
+| 0.6 | 49% | 94.2% |
+| 0.7 | 40% | 97.7% |
+| 0.8 | 23% | 100% |
+In the app this is `Decoder.cnnMinConfidence` (currently 0, always answers): "Not sure: try again" below it.
+
+## Also tried later (DEV / XS)
+- Representation: 50 Hz, untrimmed window, gravity channels, derivatives, high-pass 0.4 Hz, accel + rotation only: all 75–80 / 73–79, no better than `arv_nw8`.
+- Time-normalised input: DEV 82.7 but XS 71.8 (overfits the late-night blocks).
+- Causal session axis alignment (rotate each session's main motion axes onto a reference): much worse (62–64).
+- ROCKET (random convolution kernels + ridge): 46–56 / 65.
+
 ## Findings
 - In-session ceiling: training on half of a late-night block (plus everything else) and testing on the other half only reaches ~76–77%. Late-night takes are mouthed smaller ("you", "hear", "me" ~40–50% less motion than daytime) and vary more take to take. The class-average traces are similar to the daytime ones (no mirrored axes), so this is variability, not a systematic shift.
 - DEV and LOCKED disagree strongly (e.g. "can" 100% on DEV, 25–33% on LOCKED): late-night sessions don't transfer well to each other.
