@@ -64,6 +64,7 @@ These are measured on real AirPods data from 754 recorded takes, with held-out e
 | Demo mode: pick the right sentence (2 trained sentences, 45 real takes, each block held out) | **45 / 45** | 50% |
 | Isolated words, quiz takes (12 words) | **71%** | 8% |
 | Isolated words, whole recording blocks held out (12 words) | **50%** | 8% |
+| Word mode (5 words + no word), late-night blocks held out, D63 CNN | **80%** (locked test: 53%) | 20% |
 
 **What this is and isn't.** It's a proof of technology from one user. It isn't open-vocabulary speech yet. The recognizer is personal by design: it learns one person's movements. The next steps are a larger vocabulary, more sessions per user, and testing with people living with ALS.
 
@@ -200,16 +201,61 @@ All figures are on **held-out recording blocks** (whole sessions the model never
 - The data comes from one user over a few sessions.
 - Accuracy depends heavily on earbud fit and on how strongly words are mouthed.
 - The model doesn't learn from new practice on its own: retraining is a manual step (below).
+- Late-night, tired mouthing is the weak spot: 53% on the locked late-night test (D63).
 - Full fine-tuning during calibration would add about 7 points, but needs training support in Swift (MPSGraph or MLX).
+
+### Overnight training run (D63): the experiment loop
+
+On the night of 2026-11-07/08 the word CNN went through an unattended experiment loop: about 80 ideas plus a 191-configuration random search over roughly 8 hours, all on this Mac's GPU (PyTorch on MPS). The code, queues and every result are in [`scripts/nn/lab/`](scripts/nn/lab/), and the full log is [`RESULTS.md`](scripts/nn/lab/RESULTS.md).
+
+**1. Freeze the test first, so it can't be gamed.** Before any experiment, the last 60 isolated word takes recorded (two quizzes at 00:03–00:06 and a calibration at 00:53, the late-night fit where live accuracy had collapsed) were written to `split.json` with a checksum. Nothing trains or tunes on them. Every evaluation on them goes through one function that appends to `locked_log.jsonl`: 4 looks all night, none used to pick a model.
+
+**2. Select on two other held-out sets.**
+- **DEV:** 3 other late-night blocks (52 takes), each held out in turn.
+- **XS:** each daytime session held out entirely, scored on its quiz takes (55 takes).
+
+`confirmed-*` takes are never test data, because their labels are the model's own guess.
+
+**3. Make the loop fast.**
+- **Feature check:** the Swift feature pipeline was re-implemented in Python and checked identical on all 780 takes (max relative error 1e-6).
+- **Speed:** augmentation was vectorised and training moved to the GPU, taking one experiment from ~12 minutes to under 1.
+- **Throughput:** experiments ran from queue files, 2–4 at a time, each on 2 seeds.
+
+**4. Loop:** hypothesis → queue → DEV + XS → keep what clears the noise → combine winners → repeat. When the loop got stuck, it stepped back:
+- **Plotting class-average traces**, which ruled out mirrored axes between sessions.
+- **An in-session ceiling test:** even with half of a late-night block in training, the other half reached only ~77%.
+- **A learning curve.**
+
+| Step | DEV | XS | Locked |
+|---|---|---|---|
+| D53 weights' recipe (start of night) | 60% | – | 43% |
+| Drop `confirmed-*` takes from training | 70% | 86% | 49% |
+| + accelerometer channels, latest session weighted 8× (**shipped**, 5 networks) | **80%** | 79% | **53%** |
+
+**What didn't beat it** (each within noise or worse):
+- **Augmentation:** larger rotations, physical re-seat simulation, wide gain, weak-mouthing at the sensor noise floor, mixup, time masking.
+- **Normalisation:** per-take, causal running, and session axis alignment.
+- **Architectures:** GRU, transformer, residual SE-CNN, deeper/wider CNNs, MixStyle, prototypical networks, ROCKET, DTW templates, spectral input.
+- **Data:** synthetic DTW-interpolated takes, label cleaning, filtered confirmed takes, other words as extra classes.
+- **Adaptation:** causal recency fine-tuning, AdaBN, fit-matched fine-tuning.
+- **Combinations:** ensembles (best 80.8% combined, but two feature pipelines), SWA, and 191 random hyperparameter configurations. The top configs re-tested on fresh seeds at the shipped model's level.
+
+**What it found:**
+- **The biggest single error was the data.** Nod-confirmed decodes, saved as training data, cost about 10 points.
+- **The limit is now data, not the model.** Late-night takes are mouthed 40–50% smaller and vary a lot. The learning curve (55/71/73/78% at 25/50/75/100% of the data) extrapolates to roughly 85% at 2× today's data, 90% at 5× and 95% at ~20×.
+- **95% is possible when it's allowed to say "not sure".** Answering only at confidence ≥ 0.6–0.7 was right 94–98% of the time on 40–49% of takes (`Decoder.cnnMinConfidence`, still off).
+- **Measurement limit:** with ~107 held-out takes, the standard error is about ±4 points and seeds move results by ~3. Only changes of 5+ points count.
 
 ### Retraining the model
 
 ```bash
-python3 -m venv .venv-nn && .venv-nn/bin/pip install torch numpy
-swift run -c release LouVoiceCheck --eval ~/Library/Application\ Support/LouVoice/dataset.json \
-    --export-features /tmp/features.json
-.venv-nn/bin/python scripts/nn/train_word_cnn.py /tmp/features.json   # writes Resources/Models/word_cnn.json
-scripts/build-app.sh                                                  # bundles the new weights
+python3 -m venv .venv-nn && .venv-nn/bin/pip install torch numpy scipy
+mkdir -p /tmp/lv && cp ~/Library/Application\ Support/LouVoice/dataset.json /tmp/lv/dataset.snapshot.json
+swift run -c release LouVoiceCheck --eval /tmp/lv/dataset.snapshot.json --export-features /tmp/lv/features.json
+cd scripts/nn/lab
+LV_DATA=/tmp/lv ../../../.venv-nn/bin/python evaluate.py     # DEV + XS on the frozen split (add --locked sparingly)
+LV_DATA=/tmp/lv ../../../.venv-nn/bin/python ship.py         # writes Resources/Models/word_cnn.json
+cd ../../.. && scripts/build-app.sh                           # quit LouVoice first; then recalibrate once
 ```
 
 <details>
