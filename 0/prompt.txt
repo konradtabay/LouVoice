@@ -1,0 +1,1 @@
+great now can we test it/ lets start the training on sentances, issue i had was it was clipping words/not saying everything
