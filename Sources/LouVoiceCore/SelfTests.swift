@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// M1 acceptance checks. Defined in the library so they run both under `swift test` and under
 /// `swift run LouVoiceCheck` (Command Line Tools have no XCTest).
@@ -19,6 +20,8 @@ public enum SelfTests {
         ("nod and shake are detected, mouthing is not", gestures),
         ("quality gate rejects head movement and weak takes", quality),
         ("dataset samples round-trip through JSON", codable),
+        ("voice cache: same text → same path, other voice/text → other path", voiceCachePaths),
+        ("voice cache: ElevenLabs request has the right URL, headers and body", voiceCacheRequest),
     ]
 
     static func resampling() throws {
@@ -178,6 +181,43 @@ public enum SelfTests {
                              attitude: Quat(1, 0, 0, 0), pitch: 0.1, roll: 0.2, yaw: 0.3, location: .right)
         let back = try JSONDecoder().decode(MotionSample.self, from: JSONEncoder().encode(s))
         try expect(back == s, "round trip changed the sample")
+    }
+
+    static func voiceCachePaths() throws {
+        let root = URL(fileURLWithPath: "/tmp/lv-voicecache-check", isDirectory: true)
+        func path(_ text: String, _ voice: String, _ model: String = VoiceCache.defaultModelID) -> URL? {
+            VoiceCache.cacheURL(text: text, voiceID: voice, modelID: model, root: root)
+        }
+        let a = path("hello", "voiceA")
+        try expect(a != nil, "no path for a valid voice ID")
+        try expect(a == path("hello", "voiceA"), "same text and voice gave different paths")
+        try expect(a != path("hello", "voiceB"), "different voices share a path")
+        try expect(a?.deletingLastPathComponent().lastPathComponent == "voiceA", "voice folder missing from path")
+        try expect(a != path("help", "voiceA"), "different texts share a path")
+        try expect(a == path("Hello", "voiceA"), "case changed the path (cache is case-insensitive)")
+        try expect(a != path("hello", "voiceA", "eleven_multilingual_v2"), "different models share a path")
+        let expected = SHA256.hash(data: Data("helloeleven_flash_v2_5".utf8)).map { String(format: "%02x", $0) }.joined()
+        try expect(a?.lastPathComponent == expected + ".mp3", "file name is not sha256(lowercased text + modelId).mp3")
+        try expect(VoiceCache.defaultRoot.path.hasSuffix("Library/Application Support/LouVoice/VoiceCache"),
+                   "default root is \(VoiceCache.defaultRoot.path)")
+        try expect(path("x", "../../etc")?.path.hasPrefix(root.path + "/") == true, "voice ID escaped the cache root")
+        try expect(path("x", "../") == nil, "empty-after-sanitising voice ID accepted")
+    }
+
+    static func voiceCacheRequest() throws {
+        let key = "test-key-not-real"
+        guard let r = VoiceCache.request(text: "hello can you hear me", voiceID: "abc123", apiKey: key) else {
+            throw Failure(description: "no request built")
+        }
+        try expect(r.httpMethod == "POST", "method is \(r.httpMethod ?? "nil")")
+        try expect(r.url?.absoluteString == "https://api.elevenlabs.io/v1/text-to-speech/abc123?output_format=mp3_44100_128",
+                   "URL is \(r.url?.absoluteString ?? "nil")")
+        try expect(r.value(forHTTPHeaderField: "xi-api-key") == key, "xi-api-key header missing or wrong")
+        try expect(r.value(forHTTPHeaderField: "Content-Type") == "application/json", "Content-Type wrong")
+        try expect(r.value(forHTTPHeaderField: "Accept") == "audio/mpeg", "Accept wrong")
+        let body = try r.httpBody.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        try expect(body == ["text": "hello can you hear me", "model_id": "eleven_flash_v2_5"], "body is \(body ?? [:])")
+        try expect(VoiceCache.request(text: "hi", voiceID: "", apiKey: key) == nil, "request built without a voice ID")
     }
 
     /// Runs everything, printing one line per check. Returns the failure count.

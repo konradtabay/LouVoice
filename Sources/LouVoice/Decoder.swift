@@ -129,7 +129,7 @@ final class Decoder {
             if prediction.accepted, let word = prediction.best?.label {
                 self.results.insert(result, at: 0)
                 if self.speakResult {
-                    let spoken = await self.model.voice.speak(word)
+                    let spoken = await self.model.voice.speak(word) // VOICE HOOK (Neel)
                     // Quiet tail of the window after the word + processing + time to start playback.
                     // Bluetooth output latency (~0.1–0.2 s) comes on top and isn't measurable here.
                     let delay = features.trailingSeconds + Date().timeIntervalSince(captureEnd)
