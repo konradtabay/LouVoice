@@ -66,8 +66,9 @@ def extract(raw, t, rate=25, hp=0.8, rest=0.3, channels=("r", "v"), trim=True, m
     if gain != 1.0: r = r * gain; a = a * gain; rel = rel * gain
     v = rel @ C.T
     ch = {"a": a, "r": r, "v": v}
-    full = highpass(np.concatenate([a, r, v], 1), hp, rate)
-    ch = {"a": full[:, 0:3], "r": full[:, 3:6], "v": full[:, 6:9]}
+    gq = s[:, 6:9] @ C.T
+    full = highpass(np.concatenate([a, r, v, gq], 1), hp, rate)
+    ch = {"a": full[:, 0:3], "r": full[:, 3:6], "v": full[:, 6:9], "g": full[:, 9:12]}
     energy = np.linalg.norm(ch["r"], axis=1) + 5 * np.linalg.norm(ch["a"], axis=1)
     base = np.concatenate([ch[c] for c in channels], 1)
     if trim:

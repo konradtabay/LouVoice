@@ -22,10 +22,14 @@ _cache = {}
 NIGHT_START = 815799600  # local time on this Mac
 
 
+AUX = False   # set True to also load the other trained words as extra classes (y >= 6); never tested on
+AUX_LABELS = ["are", "how", "is", "konrad", "my", "name", "today"]
+
+
 def load(raw=False):
     """Every isolated word take with label in LABELS. x = Swift pipeline features (25 Hz, 8 dims).
     raw=True adds 'raw': (n, 16) array of r(3) a(3) g(3) q(4) p(3) at the sensor rate, and 't'."""
-    key = ("raw" if raw else "feat")
+    key = ("raw" if raw else "feat") + ("+aux" if AUX else "")
     if key in _cache: return _cache[key]
     f = json.load(open(os.path.join(DATA, "features.json")))
     rawmap = {}
@@ -43,10 +47,10 @@ def load(raw=False):
                                np.array([x["t"] for x in s], np.float64), t["createdAt"])
     takes = []
     for t in f["takes"]:
-        if t["label"] not in LABELS: continue
+        if t["label"] not in LABELS and not (AUX and t["label"] in AUX_LABELS): continue
         x = np.asarray(t["values"], np.float32).reshape(-1, t["dims"])
         if len(x) < 4: continue
-        d = dict(id=t["id"], label=t["label"], y=LABELS.index(t["label"]), block=t["block"], quiz=t["test"], x=x,
+        d = dict(id=t["id"], label=t["label"], y=LABELS.index(t["label"]) if t["label"] in LABELS else 6 + AUX_LABELS.index(t["label"]), block=t["block"], quiz=t["test"], x=x,
                  created=created[t["id"]], night=created[t["id"]] >= NIGHT_START)
         if raw and t["id"] in rawmap: d["raw"], d["t"], d["created"] = rawmap[t["id"]]
         takes.append(d)

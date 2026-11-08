@@ -78,7 +78,7 @@ class Fast:
 
     def make_net(self, D):
         c = self.c
-        return c["net"](D) if c["net"] else CNN(D, 6, c["w"], c["drop"], c["layers"])
+        return c["net"](D) if c["net"] else CNN(D, getattr(self, "K", 6), c["w"], c["drop"], c["layers"])
 
     def finetune(self, net, X, n, y, takes, cwd, g):
         """Second stage: keep training on the selected (e.g. same-evening) takes, mixed with replayed others."""
@@ -128,7 +128,8 @@ class Fast:
                 for j, v in enumerate(vs): v = v[:L]; bank[i, j, :len(v)] = torch.tensor(v / scale); bn[i, j] = len(v)
             self._bank = (bank, bn)
         sw = torch.tensor(c["weight_fn"](takes) if c["weight_fn"] else np.ones(len(xs)), dtype=torch.float32)
-        cw = torch.bincount(y, minlength=6).float(); cw = (cw.sum() / cw.clamp(min=1)) / 6
+        K = int(y.max()) + 1 if int(y.max()) >= 6 else 6; self.K = K
+        cw = torch.bincount(y, minlength=K).float(); cw = (cw.sum() / cw.clamp(min=1)) / K
         nets = []
         for mi in range(c["members"]):
             s = seed * 100 + mi; g = torch.Generator().manual_seed(s); torch.manual_seed(s)
@@ -218,5 +219,6 @@ class Fast:
                         A2, M2 = self.augment(Xt, nt, g, train=True)
                         p = p + np.mean([F.softmax(m(A2.to(DEV), M2.to(DEV)), 1).cpu().numpy() for m in nets], 0)
                     p = p / (c["tta"] + 1)
-            return p
+            p = p[:, :6]
+            return p / p.sum(1, keepdims=True)
         return predict
