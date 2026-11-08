@@ -172,16 +172,33 @@ final class StemPress {
             }
             targets.append((command, token))
         }
-        let info = MPNowPlayingInfoCenter.default()
-        info.nowPlayingInfo = [MPMediaItemPropertyTitle: "LouVoice", MPMediaItemPropertyArtist: "Press the stem to turn speaking on or off"]
-        info.playbackState = .playing
+        claimNowPlaying()
+        // At launch the first claim can land before the app has finished opening, and macOS
+        // ignores it; claim again once the window is up.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.reclaim() }
     }
 
     /// Make LouVoice the "now playing" app again (and restart the silent stream if it stopped).
     func reclaim() {
         guard isEnabled else { return }
         if engine?.isRunning != true { startSilence() }
-        MPNowPlayingInfoCenter.default().playbackState = .playing
+        claimNowPlaying()
+    }
+
+    /// macOS only hands "now playing" (and so the stem) to an app whose info looks like real
+    /// playback: a playback rate, elapsed time and duration. Title and `.playing` alone are
+    /// ignored, and a paused Spotify keeps the stem (D52, tested with MediaRemote).
+    private func claimNowPlaying() {
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "LouVoice",
+            MPMediaItemPropertyArtist: "Press the stem to turn speaking on or off",
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
+            MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
+            MPMediaItemPropertyPlaybackDuration: 86_400.0,
+        ]
+        center.playbackState = .playing
     }
 
     func disable() {
@@ -201,7 +218,7 @@ final class StemPress {
         // play/pause can arrive in pairs; debounce.
         guard Date().timeIntervalSince(lastPress) > 0.5 else { return }
         lastPress = Date()
-        MPNowPlayingInfoCenter.default().playbackState = .playing
+        claimNowPlaying()   // a pause command would otherwise leave LouVoice "paused"
         onPress?()
     }
 

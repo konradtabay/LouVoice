@@ -583,3 +583,12 @@ Adding single words to the "nothing" references cut wrongly accepted single word
 - Text updated: Speak ("or press an AirPod stem" beside Speak aloud; "Or press Space."), Settings, the Decode console, the practice break, and the now-playing subtitle.
 
 **Not verified:** a real stem press on hardware. `TODO(team)`: test with AirPods Pro 2, including after Music has played.
+
+### D52: Claiming "now playing" needs real playback info (2026-11-07). *Fixes D51.*
+**Problem reported:** With LouVoice in front, a stem press un-paused Spotify instead.
+
+**Cause:** Checked with MediaRemote (`MRMediaRemoteGetNowPlayingApplicationPID`): a paused Spotify stayed the "now playing" app. In a throwaway test app, a title plus `playbackState = .playing` and a silent output stream did **not** take over. Adding playback rate 1, elapsed time 0, a duration and media type audio **did**. Near-inaudible real audio made no further difference.
+
+**Fix:** `StemPress.claimNowPlaying()` sets that full info. It runs on enable, again 1.5 s later (a claim made while the app is still opening can be ignored), whenever LouVoice comes to the front, and after every stem press, so the pause command a press sends doesn't leave LouVoice "paused".
+
+**Checked:** Spotify paused, then LouVoice launched: LouVoice holds now playing at 1, 3, 6 and 10 s. Spotify brought to the front, then LouVoice again: LouVoice reclaims it. **Not checked:** a physical stem press (needs a person).
