@@ -8,6 +8,7 @@ import { WaitlistForm, openWaitlist } from '@/components/Waitlist'
 /* Shared pieces used by every page. */
 
 export const NAV: [string, string][] = [
+  ['Home', '/'],
   ['Purpose', '/purpose'],
   ['Caregivers', '/caregivers'],
 ]
