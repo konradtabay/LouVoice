@@ -15,6 +15,7 @@
   <img alt="Swift" src="https://img.shields.io/badge/Swift-SwiftPM-682bd7?style=flat-square">
   <img alt="Hardware" src="https://img.shields.io/badge/hardware-AirPods%20Pro%202-3d1689?style=flat-square">
   <img alt="BioHacks 2026" src="https://img.shields.io/badge/BioHacks-2026-bd2e95?style=flat-square">
+  <a href="https://www.youtube.com/watch?v=decm1fectI0"><img alt="Demo video" src="https://img.shields.io/badge/demo-YouTube-ff0000?style=flat-square&logo=youtube&logoColor=white"></a>
 </p>
 
 ---
@@ -38,8 +39,16 @@ Today's options are eye-gaze boards, typing, and generic synthetic voices. They'
 
 ## Demo
 
-<!-- TODO: replace with the demo video. On GitHub: edit this file in the browser, drag the .mp4 here, and GitHub inserts a user-attachments link that plays inline. -->
-> 🎬 **Demo video coming.** Until then, the GIF above shows live sensor data, and [louvoice.health](https://louvoice.health) shows the product.
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=decm1fectI0" title="Watch the LouVoice demo on YouTube">
+    <img src="https://img.youtube.com/vi/decm1fectI0/maxresdefault.jpg" alt="LouVoice demo video: a word is mouthed silently and spoken aloud in the user's own voice" width="100%">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=decm1fectI0"><img alt="Watch the demo on YouTube" src="https://img.shields.io/badge/%E2%96%B6%EF%B8%8E%20Watch%20the%20demo-YouTube-ff0000?style=for-the-badge&logo=youtube&logoColor=white"></a>
+  <br><sub>Click to watch: a word is mouthed silently, recognised from AirPods motion alone, and spoken in the user's own voice.</sub>
+</p>
 
 ## How it works
 
